@@ -1,8 +1,10 @@
 use crate::order::book::{Book, Depth, DepthItem, Error};
 use crate::order::{Id, Order, Price, Side, Volume};
+use crate::trade::Trade;
 use slab::Slab;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
+use time::OffsetDateTime;
 
 #[derive(Debug, Default)]
 struct PriceLevel {
@@ -79,15 +81,15 @@ impl TreeMap {
         let side = self.orders[idx].order.side;
         self.order_indexes.remove(&self.orders[idx].order.id);
         let level = match side {
-            Side::Buy => self.bids.get_mut(&price).unwrap(),
-            Side::Sell => self.asks.get_mut(&price).unwrap(),
+            Side::Bid => self.bids.get_mut(&price).unwrap(),
+            Side::Ask => self.asks.get_mut(&price).unwrap(),
         };
         level.remove(&mut self.orders, idx);
         self.orders.remove(idx);
         if level.total_orders == 0 {
             match side {
-                Side::Buy => self.bids.remove(&price),
-                Side::Sell => self.asks.remove(&price),
+                Side::Bid => self.bids.remove(&price),
+                Side::Ask => self.asks.remove(&price),
             };
         }
     }
@@ -128,8 +130,8 @@ impl Book for TreeMap {
         });
         self.order_indexes.insert(self.orders[idx].order.id, idx);
         let level = match self.orders[idx].order.side {
-            Side::Buy => self.bids.entry(self.orders[idx].order.price).or_default(),
-            Side::Sell => self.asks.entry(self.orders[idx].order.price).or_default(),
+            Side::Bid => self.bids.entry(self.orders[idx].order.price).or_default(),
+            Side::Ask => self.asks.entry(self.orders[idx].order.price).or_default(),
         };
         level.push(&mut self.orders, idx);
         self.last_seq += 1;
@@ -172,9 +174,10 @@ impl Book for TreeMap {
         }
     }
 
-    fn match_orders(&mut self) {
+    fn match_orders(&mut self) -> Vec<Trade> {
         let asks_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.asks;
         let bids_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.bids;
+        let mut trades = Vec::new();
 
         loop {
             let (top_bid_price, top_bid_level) = unsafe {
@@ -193,15 +196,34 @@ impl Book for TreeMap {
             if top_ask_price > top_bid_price {
                 break;
             }
-            let volume = cmp::min(top_bid_level.total_volume, top_ask_level.total_volume);
-            if volume == 0 {
-                break;
-            }
 
-            self.remove_by_volume(top_bid_level, volume);
-            self.remove_by_volume(top_ask_level, volume);
+            let mut volume = cmp::min(top_bid_level.total_volume, top_ask_level.total_volume);
+            while volume > 0 {
+                let bid_idx = top_bid_level.head.unwrap();
+                let ask_idx = top_ask_level.head.unwrap();
+                let trade_volume = cmp::min(self.orders[bid_idx].order.remaining_volume(), self.orders[ask_idx].order.remaining_volume());
+                let (trade_price, is_bid_maker) = if self.orders[bid_idx].seq < self.orders[ask_idx].seq {
+                    (self.orders[bid_idx].order.price, true)
+                } else {
+                    (self.orders[ask_idx].order.price, false)
+                };
+                trades.push(Trade{
+                    id: 0,
+                    bid_order_id: self.orders[bid_idx].order.id,
+                    ask_order_id: self.orders[ask_idx].order.id,
+                    is_bid_maker,
+                    price: trade_price,
+                    volume: trade_volume,
+                    timestamp: OffsetDateTime::now_utc(),
+                });
+                self.remove_by_volume(top_bid_level, volume);
+                self.remove_by_volume(top_ask_level, volume);
+                volume -= trade_volume
+            }
 
             // TODO: generate trades
         }
+
+        trades
     }
 }

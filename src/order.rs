@@ -1,7 +1,7 @@
 #[derive(Debug, Copy, Clone)]
 pub enum Side {
-    Buy,
-    Sell
+    Bid,
+    Ask
 }
 
 #[derive(Debug, Copy, Clone)]

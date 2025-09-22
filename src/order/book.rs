@@ -27,5 +27,5 @@ pub trait Book {
     fn add(&mut self, order: Order) -> Result<(), Error>;
     fn cancel(&mut self, id: Id) -> Result<(), Error>;
     fn depth(&self, limit: usize) -> Depth;
-    fn match_orders(&mut self);
+    fn match_orders(&mut self) -> Vec<crate::trade::Trade>;
 }

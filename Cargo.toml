@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 slab = "0.4.11"
+time = { version = "0.3", features = ["macros"] }
