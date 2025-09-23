@@ -1,3 +1,11 @@
+//! Order book implementation backed by BTreeMap price levels.
+//!
+//! This module provides a simple price-time priority limit order book using two
+//! BTreeMaps (one for bids descending, one for asks ascending). Each price level
+//! maintains a FIFO queue of orders via indices into a Slab, avoiding frequent
+//! allocations and allowing O(1) insertion/removal within a level. Matching is
+//! performed by crossing the best bid and best ask while prices overlap.
+
 use crate::order::book::{Book, Depth, DepthItem, Error};
 use crate::order::{Id, Order, Price, Side, Volume};
 use crate::trade::Trade;
@@ -6,6 +14,10 @@ use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use time::OffsetDateTime;
 
+/// Aggregated state for a single price level.
+///
+/// Keeps the head/tail of a doubly-linked list of orders (by slab index), as
+/// well as cumulative volume and order count for quick depth queries.
 #[derive(Debug, Default)]
 struct PriceLevel {
     head: Option<usize>,
@@ -15,6 +27,8 @@ struct PriceLevel {
 }
 
 impl PriceLevel {
+    /// Append an order node to the back of the level's FIFO queue and update
+    /// aggregates. The `order_idx` must reference a valid entry in `orders`.
     fn push(&mut self, orders: &mut Slab<OrderNode>, order_idx: usize) {
         match self.tail {
             Some(tail) => {
@@ -33,6 +47,8 @@ impl PriceLevel {
         self.total_orders += 1;
     }
 
+    /// Remove a specific order node from the level's queue and update
+    /// aggregates. The node must be currently linked in this level.
     fn remove(&mut self, orders: &mut Slab<OrderNode>, order_idx: usize) {
         let prev = orders[order_idx].prev;
         let next = orders[order_idx].next;
@@ -54,14 +70,18 @@ impl PriceLevel {
     }
 }
 
+/// Node representing an individual order stored in a slab and linked within a
+/// price level's FIFO queue.
 #[derive(Debug)]
 struct OrderNode {
     order: Order,
+    /// Sequence number assigned on insertion for time-priority comparison.
     seq: usize,
     next: Option<usize>,
     prev: Option<usize>,
 }
 
+/// BTreeMap-backed order book implementing price-time priority.
 #[derive(Debug, Default)]
 pub struct TreeMap {
     bids: BTreeMap<Price, PriceLevel>,
@@ -72,10 +92,13 @@ pub struct TreeMap {
 }
 
 impl TreeMap {
+    /// Create a new, empty TreeMap order book.
     pub fn new() -> Self {
         TreeMap::default()
     }
 
+    /// Remove an order (by slab index) from its corresponding price level and
+    /// delete it from the book, cleaning up empty price levels.
     fn remove_order_from_level(&mut self, idx: usize) {
         let price = self.orders[idx].order.price;
         let side = self.orders[idx].order.side;
@@ -94,6 +117,9 @@ impl TreeMap {
         }
     }
 
+    /// Reduce (and possibly remove) orders from the given price level by a
+    /// target `volume`, walking from the head to preserve FIFO. Panics if
+    /// `volume` exceeds the level's total available volume.
     fn remove_by_volume(&mut self, level: &mut PriceLevel, volume: Volume) {
         assert!(volume <= level.total_volume);
 
@@ -101,14 +127,15 @@ impl TreeMap {
         while remaining_volume > 0 && level.total_volume > 0 {
             let idx = level.head.unwrap();
 
-            // if the remaining volume is higher than the remaining volume in the order, remove the order completely
+            // If the desired reduction is greater than or equal to the order's
+            // remaining volume, remove the order completely and continue.
             if self.orders[idx].order.remaining_volume() <= remaining_volume {
                 remaining_volume -= self.orders[idx].order.remaining_volume();
                 self.remove_order_from_level(idx);
                 continue;
             }
 
-            // if the remaining volume is lower than the remaining volume in the order, execute the order partially
+            // Otherwise, partially execute the order and stop.
             level.total_volume -= self.orders[idx].order.remaining_volume();
             self.orders[idx].order.executed_volume += remaining_volume;
             break;
@@ -117,6 +144,7 @@ impl TreeMap {
 }
 
 impl Book for TreeMap {
+    /// Insert a new order into the book at its price level.
     fn add(&mut self, order: Order) -> Result<(), Error> {
         if self.order_indexes.contains_key(&order.id) {
             return Err(Error::OrderExists);
@@ -139,6 +167,7 @@ impl Book for TreeMap {
         Ok(())
     }
 
+    /// Cancel an existing order by id.
     fn cancel(&mut self, id: Id) -> Result<(), Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
@@ -150,6 +179,7 @@ impl Book for TreeMap {
         Ok(())
     }
 
+    /// Return a snapshot of top-of-book depth up to `limit` levels per side.
     fn depth(&self, limit: usize) -> Depth {
         Depth {
             bids: self
@@ -174,6 +204,9 @@ impl Book for TreeMap {
         }
     }
 
+    /// Match the best bid and best ask while there is price overlap, producing
+    /// trades and updating order states. The trade price follows maker-taker
+    /// precedence: the earlier order at the top levels sets the price.
     fn match_orders(&mut self) -> Vec<Trade> {
         let asks_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.asks;
         let bids_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.bids;
@@ -220,8 +253,6 @@ impl Book for TreeMap {
                 self.remove_by_volume(top_ask_level, volume);
                 volume -= trade_volume
             }
-
-            // TODO: generate trades
         }
 
         trades
