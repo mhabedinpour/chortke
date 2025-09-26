@@ -6,6 +6,7 @@
 pub mod tree_map;
 
 use crate::order::{Id, Order, Price, Volume};
+use thiserror::Error;
 
 /// Aggregated depth at a single price level.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -26,12 +27,14 @@ pub struct Depth {
 }
 
 /// Generic order-book errors.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
+    #[error("could not find order #{0}")]
     /// Tried to operate on an order that does not exist.
-    OrderNotFound,
+    OrderNotFound(Id),
+    #[error("another order with the same id #{0} already exists")]
     /// Tried to add an order with an ID that already exists.
-    OrderExists,
+    OrderExists(Id),
 }
 
 // TODO: add prometheus metrics

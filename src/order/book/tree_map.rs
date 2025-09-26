@@ -147,7 +147,7 @@ impl Book for TreeMap {
     /// Insert a new order into the book at its price level.
     fn add(&mut self, order: Order) -> Result<(), Error> {
         if self.order_indexes.contains_key(&order.id) {
-            return Err(Error::OrderExists);
+            return Err(Error::OrderExists(order.id));
         }
 
         let idx = self.orders.insert(OrderNode {
@@ -171,7 +171,7 @@ impl Book for TreeMap {
     fn cancel(&mut self, id: Id) -> Result<(), Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
-            return Err(Error::OrderNotFound);
+            return Err(Error::OrderNotFound(id));
         }
 
         self.remove_order_from_level(*idx.unwrap());
@@ -300,11 +300,11 @@ mod tests {
         book.add(o(10, Side::Bid, 100, 5)).unwrap();
         // Duplicate id should fail
         let err = book.add(o(10, Side::Ask, 101, 1)).unwrap_err();
-        match err { crate::order::book::Error::OrderExists => {}, _ => panic!("expected Error::OrderExists for duplicate id, got different error") }
+        match err { crate::order::book::Error::OrderExists(_) => {}, _ => panic!("expected Error::OrderExists for duplicate id, got different error") }
 
         // Cancel unknown id should fail
         let err = book.cancel(999).unwrap_err();
-        match err { crate::order::book::Error::OrderNotFound => {}, _ => panic!("expected Error::OrderNotFound for unknown id, got different error") }
+        match err { crate::order::book::Error::OrderNotFound(_) => {}, _ => panic!("expected Error::OrderNotFound for unknown id, got different error") }
     }
 
     #[test]
