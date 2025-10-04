@@ -4,8 +4,8 @@
 //! execution price, volume, side that provided liquidity (maker), and a
 //! timestamp.
 
-use time::OffsetDateTime;
 use crate::order;
+use time::OffsetDateTime;
 
 /// Unique identifier for trades.
 pub type Id = u64;

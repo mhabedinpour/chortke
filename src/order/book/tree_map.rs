@@ -234,13 +234,17 @@ impl Book for TreeMap {
             while volume > 0 {
                 let bid_idx = top_bid_level.head.unwrap();
                 let ask_idx = top_ask_level.head.unwrap();
-                let trade_volume = cmp::min(self.orders[bid_idx].order.remaining_volume(), self.orders[ask_idx].order.remaining_volume());
-                let (trade_price, is_bid_maker) = if self.orders[bid_idx].seq < self.orders[ask_idx].seq {
-                    (self.orders[bid_idx].order.price, true)
-                } else {
-                    (self.orders[ask_idx].order.price, false)
-                };
-                trades.push(Trade{
+                let trade_volume = cmp::min(
+                    self.orders[bid_idx].order.remaining_volume(),
+                    self.orders[ask_idx].order.remaining_volume(),
+                );
+                let (trade_price, is_bid_maker) =
+                    if self.orders[bid_idx].seq < self.orders[ask_idx].seq {
+                        (self.orders[bid_idx].order.price, true)
+                    } else {
+                        (self.orders[ask_idx].order.price, false)
+                    };
+                trades.push(Trade {
                     id: 0,
                     bid_order_id: self.orders[bid_idx].order.id,
                     ask_order_id: self.orders[ask_idx].order.id,
@@ -258,7 +262,6 @@ impl Book for TreeMap {
         trades
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -283,14 +286,58 @@ mod tests {
         let d = book.depth(10);
 
         // Bids should be in descending order by price.
-        assert_eq!(d.bids.len(), 2, "bids length mismatch: got {} bids: {:?}", d.bids.len(), d.bids);
-        assert_eq!(d.bids[0], DepthItem { price: 101, volume: 1 }, "top bid depth item mismatch: got {:?}", d.bids.get(0));
-        assert_eq!(d.bids[1], DepthItem { price: 100, volume: 5 }, "second bid depth item mismatch: got {:?}", d.bids.get(1));
+        assert_eq!(
+            d.bids.len(),
+            2,
+            "bids length mismatch: got {} bids: {:?}",
+            d.bids.len(),
+            d.bids
+        );
+        assert_eq!(
+            d.bids[0],
+            DepthItem {
+                price: 101,
+                volume: 1
+            },
+            "top bid depth item mismatch: got {:?}",
+            d.bids.get(0)
+        );
+        assert_eq!(
+            d.bids[1],
+            DepthItem {
+                price: 100,
+                volume: 5
+            },
+            "second bid depth item mismatch: got {:?}",
+            d.bids.get(1)
+        );
 
         // Asks should be in ascending order by price.
-        assert_eq!(d.asks.len(), 2, "asks length mismatch: got {} asks: {:?}", d.asks.len(), d.asks);
-        assert_eq!(d.asks[0], DepthItem { price: 102, volume: 7 }, "top ask depth item mismatch: got {:?}", d.asks.get(0));
-        assert_eq!(d.asks[1], DepthItem { price: 103, volume: 2 }, "second ask depth item mismatch: got {:?}", d.asks.get(1));
+        assert_eq!(
+            d.asks.len(),
+            2,
+            "asks length mismatch: got {} asks: {:?}",
+            d.asks.len(),
+            d.asks
+        );
+        assert_eq!(
+            d.asks[0],
+            DepthItem {
+                price: 102,
+                volume: 7
+            },
+            "top ask depth item mismatch: got {:?}",
+            d.asks.get(0)
+        );
+        assert_eq!(
+            d.asks[1],
+            DepthItem {
+                price: 103,
+                volume: 2
+            },
+            "second ask depth item mismatch: got {:?}",
+            d.asks.get(1)
+        );
     }
 
     #[test]
@@ -300,11 +347,17 @@ mod tests {
         book.add(o(10, Side::Bid, 100, 5)).unwrap();
         // Duplicate id should fail
         let err = book.add(o(10, Side::Ask, 101, 1)).unwrap_err();
-        match err { crate::order::book::Error::OrderExists(_) => {}, _ => panic!("expected Error::OrderExists for duplicate id, got different error") }
+        match err {
+            crate::order::book::Error::OrderExists(_) => {}
+            _ => panic!("expected Error::OrderExists for duplicate id, got different error"),
+        }
 
         // Cancel unknown id should fail
         let err = book.cancel(999).unwrap_err();
-        match err { crate::order::book::Error::OrderNotFound(_) => {}, _ => panic!("expected Error::OrderNotFound for unknown id, got different error") }
+        match err {
+            crate::order::book::Error::OrderNotFound(_) => {}
+            _ => panic!("expected Error::OrderNotFound for unknown id, got different error"),
+        }
     }
 
     #[test]
@@ -322,16 +375,58 @@ mod tests {
 
         // Limit to top 2 levels per side
         let d = book.depth(2);
-        assert_eq!(d.bids.len(), 2, "bids length with limit=2 mismatch: {:?}", d.bids);
-        assert_eq!(d.asks.len(), 2, "asks length with limit=2 mismatch: {:?}", d.asks);
+        assert_eq!(
+            d.bids.len(),
+            2,
+            "bids length with limit=2 mismatch: {:?}",
+            d.bids
+        );
+        assert_eq!(
+            d.asks.len(),
+            2,
+            "asks length with limit=2 mismatch: {:?}",
+            d.asks
+        );
 
         // Bids descending: 102, 101
-        assert_eq!(d.bids[0], DepthItem { price: 102, volume: 3 }, "top bid level mismatch: got {:?}", d.bids.get(0));
-        assert_eq!(d.bids[1], DepthItem { price: 101, volume: 2 }, "second bid level mismatch: got {:?}", d.bids.get(1));
+        assert_eq!(
+            d.bids[0],
+            DepthItem {
+                price: 102,
+                volume: 3
+            },
+            "top bid level mismatch: got {:?}",
+            d.bids.get(0)
+        );
+        assert_eq!(
+            d.bids[1],
+            DepthItem {
+                price: 101,
+                volume: 2
+            },
+            "second bid level mismatch: got {:?}",
+            d.bids.get(1)
+        );
 
         // Asks ascending: 103, 104
-        assert_eq!(d.asks[0], DepthItem { price: 103, volume: 4 }, "top ask level mismatch: got {:?}", d.asks.get(0));
-        assert_eq!(d.asks[1], DepthItem { price: 104, volume: 5 }, "second ask level mismatch: got {:?}", d.asks.get(1));
+        assert_eq!(
+            d.asks[0],
+            DepthItem {
+                price: 103,
+                volume: 4
+            },
+            "top ask level mismatch: got {:?}",
+            d.asks.get(0)
+        );
+        assert_eq!(
+            d.asks[1],
+            DepthItem {
+                price: 104,
+                volume: 5
+            },
+            "second ask level mismatch: got {:?}",
+            d.asks.get(1)
+        );
     }
 
     #[test]
@@ -342,18 +437,47 @@ mod tests {
         book.add(o(2, Side::Ask, 100, 5)).unwrap();
 
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 1, "expected exactly one trade, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            1,
+            "expected exactly one trade, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         let t = &trades[0];
-        assert_eq!(t.bid_order_id, 1, "bid order id mismatch: got {}", t.bid_order_id);
-        assert_eq!(t.ask_order_id, 2, "ask order id mismatch: got {}", t.ask_order_id);
-        assert!(t.is_bid_maker, "maker side mismatch: expected bid maker, got ask maker");
-        assert_eq!(t.price, 101, "trade price mismatch (should be maker price): got {}", t.price); // maker's price
+        assert_eq!(
+            t.bid_order_id, 1,
+            "bid order id mismatch: got {}",
+            t.bid_order_id
+        );
+        assert_eq!(
+            t.ask_order_id, 2,
+            "ask order id mismatch: got {}",
+            t.ask_order_id
+        );
+        assert!(
+            t.is_bid_maker,
+            "maker side mismatch: expected bid maker, got ask maker"
+        );
+        assert_eq!(
+            t.price, 101,
+            "trade price mismatch (should be maker price): got {}",
+            t.price
+        ); // maker's price
         assert_eq!(t.volume, 5, "trade volume mismatch: got {}", t.volume);
 
         // Book should be empty after full cross
         let d = book.depth(10);
-        assert!(d.bids.is_empty(), "expected no resting bids, got: {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected no resting asks, got: {:?}", d.asks);
+        assert!(
+            d.bids.is_empty(),
+            "expected no resting bids, got: {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected no resting asks, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -364,17 +488,46 @@ mod tests {
         book.add(o(11, Side::Bid, 101, 4)).unwrap();
 
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 1, "expected exactly one trade, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            1,
+            "expected exactly one trade, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         let t = &trades[0];
-        assert_eq!(t.bid_order_id, 11, "bid order id mismatch: got {}", t.bid_order_id);
-        assert_eq!(t.ask_order_id, 10, "ask order id mismatch: got {}", t.ask_order_id);
-        assert!(!t.is_bid_maker, "maker side mismatch: expected ask maker, got bid maker");
-        assert_eq!(t.price, 100, "trade price mismatch (should be maker price): got {}", t.price); // maker's price
+        assert_eq!(
+            t.bid_order_id, 11,
+            "bid order id mismatch: got {}",
+            t.bid_order_id
+        );
+        assert_eq!(
+            t.ask_order_id, 10,
+            "ask order id mismatch: got {}",
+            t.ask_order_id
+        );
+        assert!(
+            !t.is_bid_maker,
+            "maker side mismatch: expected ask maker, got bid maker"
+        );
+        assert_eq!(
+            t.price, 100,
+            "trade price mismatch (should be maker price): got {}",
+            t.price
+        ); // maker's price
         assert_eq!(t.volume, 4, "trade volume mismatch: got {}", t.volume);
 
         let d = book.depth(10);
-        assert!(d.bids.is_empty(), "expected no resting bids, got: {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected no resting asks, got: {:?}", d.asks);
+        assert!(
+            d.bids.is_empty(),
+            "expected no resting bids, got: {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected no resting asks, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -387,24 +540,80 @@ mod tests {
         book.add(o(3, Side::Ask, 99, 4)).unwrap();
 
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 2, "expected two trades, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            2,
+            "expected two trades, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         // First trade fully fills bid id=1 with 2
-        assert_eq!(trades[0].bid_order_id, 1, "first trade bid id mismatch: got {}", trades[0].bid_order_id);
-        assert_eq!(trades[0].ask_order_id, 3, "first trade ask id mismatch: got {}", trades[0].ask_order_id);
-        assert_eq!(trades[0].volume, 2, "first trade volume mismatch: got {}", trades[0].volume);
-        assert!(trades[0].is_bid_maker, "first trade maker mismatch: expected bid maker"); // bid was earlier than ask
-        assert_eq!(trades[0].price, 100, "first trade price mismatch: got {}", trades[0].price);
+        assert_eq!(
+            trades[0].bid_order_id, 1,
+            "first trade bid id mismatch: got {}",
+            trades[0].bid_order_id
+        );
+        assert_eq!(
+            trades[0].ask_order_id, 3,
+            "first trade ask id mismatch: got {}",
+            trades[0].ask_order_id
+        );
+        assert_eq!(
+            trades[0].volume, 2,
+            "first trade volume mismatch: got {}",
+            trades[0].volume
+        );
+        assert!(
+            trades[0].is_bid_maker,
+            "first trade maker mismatch: expected bid maker"
+        ); // bid was earlier than ask
+        assert_eq!(
+            trades[0].price, 100,
+            "first trade price mismatch: got {}",
+            trades[0].price
+        );
         // Second trade partially fills bid id=2 with remaining 2
-        assert_eq!(trades[1].bid_order_id, 2, "second trade bid id mismatch: got {}", trades[1].bid_order_id);
-        assert_eq!(trades[1].ask_order_id, 3, "second trade ask id mismatch: got {}", trades[1].ask_order_id);
-        assert_eq!(trades[1].volume, 2, "second trade volume mismatch: got {}", trades[1].volume);
-        assert!(trades[1].is_bid_maker, "second trade maker mismatch: expected bid maker");
-        assert_eq!(trades[1].price, 100, "second trade price mismatch: got {}", trades[1].price);
+        assert_eq!(
+            trades[1].bid_order_id, 2,
+            "second trade bid id mismatch: got {}",
+            trades[1].bid_order_id
+        );
+        assert_eq!(
+            trades[1].ask_order_id, 3,
+            "second trade ask id mismatch: got {}",
+            trades[1].ask_order_id
+        );
+        assert_eq!(
+            trades[1].volume, 2,
+            "second trade volume mismatch: got {}",
+            trades[1].volume
+        );
+        assert!(
+            trades[1].is_bid_maker,
+            "second trade maker mismatch: expected bid maker"
+        );
+        assert_eq!(
+            trades[1].price, 100,
+            "second trade price mismatch: got {}",
+            trades[1].price
+        );
 
         // Remaining depth: bid at 100 with volume 1; no asks
         let d = book.depth(10);
-        assert_eq!(d.bids, vec![DepthItem { price: 100, volume: 1 }], "remaining bids mismatch: got {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected no resting asks, got: {:?}", d.asks);
+        assert_eq!(
+            d.bids,
+            vec![DepthItem {
+                price: 100,
+                volume: 1
+            }],
+            "remaining bids mismatch: got {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected no resting asks, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -413,8 +622,16 @@ mod tests {
         book.add(o(1, Side::Bid, 100, 5)).unwrap();
         book.add(o(2, Side::Ask, 101, 5)).unwrap();
         let d = book.depth(0);
-        assert!(d.bids.is_empty(), "limit=0 should return no bid levels, got: {:?}", d.bids);
-        assert!(d.asks.is_empty(), "limit=0 should return no ask levels, got: {:?}", d.asks);
+        assert!(
+            d.bids.is_empty(),
+            "limit=0 should return no bid levels, got: {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "limit=0 should return no ask levels, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -424,10 +641,22 @@ mod tests {
         book.add(o(2, Side::Ask, 101, 5)).unwrap();
         let d_before = book.depth(10);
         let trades = book.match_orders();
-        assert!(trades.is_empty(), "expected no trades when no price overlap, got: {:?}", trades);
+        assert!(
+            trades.is_empty(),
+            "expected no trades when no price overlap, got: {:?}",
+            trades
+        );
         let d_after = book.depth(10);
-        assert_eq!(d_before.bids, d_after.bids, "bids changed despite no trades: before={:?}, after={:?}", d_before.bids, d_after.bids);
-        assert_eq!(d_before.asks, d_after.asks, "asks changed despite no trades: before={:?}, after={:?}", d_before.asks, d_after.asks);
+        assert_eq!(
+            d_before.bids, d_after.bids,
+            "bids changed despite no trades: before={:?}, after={:?}",
+            d_before.bids, d_after.bids
+        );
+        assert_eq!(
+            d_before.asks, d_after.asks,
+            "asks changed despite no trades: before={:?}, after={:?}",
+            d_before.asks, d_after.asks
+        );
     }
 
     #[test]
@@ -435,11 +664,24 @@ mod tests {
         let mut book = TreeMap::new();
         book.add(o(1, Side::Bid, 100, 3)).unwrap();
         let d = book.depth(10);
-        assert_eq!(d.bids.len(), 1, "expected exactly one bid level before cancel, got: {:?}", d.bids);
+        assert_eq!(
+            d.bids.len(),
+            1,
+            "expected exactly one bid level before cancel, got: {:?}",
+            d.bids
+        );
         book.cancel(1).unwrap();
         let d2 = book.depth(10);
-        assert!(d2.bids.is_empty(), "expected bid level removed after cancel, got: {:?}", d2.bids);
-        assert!(d2.asks.is_empty(), "expected no asks either, got: {:?}", d2.asks);
+        assert!(
+            d2.bids.is_empty(),
+            "expected bid level removed after cancel, got: {:?}",
+            d2.bids
+        );
+        assert!(
+            d2.asks.is_empty(),
+            "expected no asks either, got: {:?}",
+            d2.asks
+        );
     }
 
     #[test]
@@ -452,17 +694,50 @@ mod tests {
         // Now cross with an ask that takes 2. It should trade against id=2.
         book.add(o(3, Side::Ask, 99, 2)).unwrap();
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 1, "expected one trade after crossing, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            1,
+            "expected one trade after crossing, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         let t = &trades[0];
-        assert_eq!(t.bid_order_id, 2, "maker bid id should be 2 after canceling head; got {}", t.bid_order_id);
-        assert_eq!(t.ask_order_id, 3, "taker ask id mismatch: got {}", t.ask_order_id);
-        assert!(t.is_bid_maker, "expected bid to be maker after canceling head");
-        assert_eq!(t.price, 100, "trade price should be maker (100), got {}", t.price);
+        assert_eq!(
+            t.bid_order_id, 2,
+            "maker bid id should be 2 after canceling head; got {}",
+            t.bid_order_id
+        );
+        assert_eq!(
+            t.ask_order_id, 3,
+            "taker ask id mismatch: got {}",
+            t.ask_order_id
+        );
+        assert!(
+            t.is_bid_maker,
+            "expected bid to be maker after canceling head"
+        );
+        assert_eq!(
+            t.price, 100,
+            "trade price should be maker (100), got {}",
+            t.price
+        );
         assert_eq!(t.volume, 2, "trade volume mismatch, got {}", t.volume);
         // Remaining at 100: 1
         let d = book.depth(10);
-        assert_eq!(d.bids, vec![DepthItem { price: 100, volume: 1 }], "remaining bid depth mismatch: got {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected no remaining asks, got: {:?}", d.asks);
+        assert_eq!(
+            d.bids,
+            vec![DepthItem {
+                price: 100,
+                volume: 1
+            }],
+            "remaining bid depth mismatch: got {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected no remaining asks, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -475,24 +750,80 @@ mod tests {
         book.add(o(12, Side::Bid, 103, 10)).unwrap();
 
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 2, "expected two trades when sweeping two ask levels, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            2,
+            "expected two trades when sweeping two ask levels, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         // First trade hits best ask 101
-        assert_eq!(trades[0].ask_order_id, 10, "first trade ask id mismatch: got {}", trades[0].ask_order_id);
-        assert_eq!(trades[0].bid_order_id, 12, "first trade bid id mismatch: got {}", trades[0].bid_order_id);
-        assert!(!trades[0].is_bid_maker, "first trade maker side mismatch: expected ask maker");
-        assert_eq!(trades[0].price, 101, "first trade price mismatch: got {}", trades[0].price);
-        assert_eq!(trades[0].volume, 2, "first trade volume mismatch: got {}", trades[0].volume);
+        assert_eq!(
+            trades[0].ask_order_id, 10,
+            "first trade ask id mismatch: got {}",
+            trades[0].ask_order_id
+        );
+        assert_eq!(
+            trades[0].bid_order_id, 12,
+            "first trade bid id mismatch: got {}",
+            trades[0].bid_order_id
+        );
+        assert!(
+            !trades[0].is_bid_maker,
+            "first trade maker side mismatch: expected ask maker"
+        );
+        assert_eq!(
+            trades[0].price, 101,
+            "first trade price mismatch: got {}",
+            trades[0].price
+        );
+        assert_eq!(
+            trades[0].volume, 2,
+            "first trade volume mismatch: got {}",
+            trades[0].volume
+        );
         // Second trade hits next ask 102
-        assert_eq!(trades[1].ask_order_id, 11, "second trade ask id mismatch: got {}", trades[1].ask_order_id);
-        assert_eq!(trades[1].bid_order_id, 12, "second trade bid id mismatch: got {}", trades[1].bid_order_id);
-        assert!(!trades[1].is_bid_maker, "second trade maker side mismatch: expected ask maker");
-        assert_eq!(trades[1].price, 102, "second trade price mismatch: got {}", trades[1].price);
-        assert_eq!(trades[1].volume, 3, "second trade volume mismatch: got {}", trades[1].volume);
+        assert_eq!(
+            trades[1].ask_order_id, 11,
+            "second trade ask id mismatch: got {}",
+            trades[1].ask_order_id
+        );
+        assert_eq!(
+            trades[1].bid_order_id, 12,
+            "second trade bid id mismatch: got {}",
+            trades[1].bid_order_id
+        );
+        assert!(
+            !trades[1].is_bid_maker,
+            "second trade maker side mismatch: expected ask maker"
+        );
+        assert_eq!(
+            trades[1].price, 102,
+            "second trade price mismatch: got {}",
+            trades[1].price
+        );
+        assert_eq!(
+            trades[1].volume, 3,
+            "second trade volume mismatch: got {}",
+            trades[1].volume
+        );
 
         // Remaining bid should rest at 103 with volume 5
         let d = book.depth(10);
-        assert_eq!(d.bids, vec![DepthItem { price: 103, volume: 5 }], "remaining bids after sweep mismatch: got {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected all asks consumed, got: {:?}", d.asks);
+        assert_eq!(
+            d.bids,
+            vec![DepthItem {
+                price: 103,
+                volume: 5
+            }],
+            "remaining bids after sweep mismatch: got {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected all asks consumed, got: {:?}",
+            d.asks
+        );
     }
 
     #[test]
@@ -502,16 +833,45 @@ mod tests {
         book.add(o(1, Side::Bid, 100, 5)).unwrap();
         book.add(o(2, Side::Ask, 100, 3)).unwrap();
         let trades = book.match_orders();
-        assert_eq!(trades.len(), 1, "expected one trade at equal price, got {}: {:?}", trades.len(), trades);
+        assert_eq!(
+            trades.len(),
+            1,
+            "expected one trade at equal price, got {}: {:?}",
+            trades.len(),
+            trades
+        );
         let t = &trades[0];
         assert_eq!(t.bid_order_id, 1, "bid id mismatch: got {}", t.bid_order_id);
         assert_eq!(t.ask_order_id, 2, "ask id mismatch: got {}", t.ask_order_id);
-        assert!(t.is_bid_maker, "maker side mismatch: expected bid maker at equal price");
-        assert_eq!(t.price, 100, "trade price mismatch at equal price: got {}", t.price);
-        assert_eq!(t.volume, 3, "trade volume mismatch at equal price: got {}", t.volume);
+        assert!(
+            t.is_bid_maker,
+            "maker side mismatch: expected bid maker at equal price"
+        );
+        assert_eq!(
+            t.price, 100,
+            "trade price mismatch at equal price: got {}",
+            t.price
+        );
+        assert_eq!(
+            t.volume, 3,
+            "trade volume mismatch at equal price: got {}",
+            t.volume
+        );
         // Remaining on bid: 2 at 100
         let d = book.depth(10);
-        assert_eq!(d.bids, vec![DepthItem { price: 100, volume: 2 }], "remaining bids mismatch after partial fill: got {:?}", d.bids);
-        assert!(d.asks.is_empty(), "expected no resting asks after partial fill, got: {:?}", d.asks);
+        assert_eq!(
+            d.bids,
+            vec![DepthItem {
+                price: 100,
+                volume: 2
+            }],
+            "remaining bids mismatch after partial fill: got {:?}",
+            d.bids
+        );
+        assert!(
+            d.asks.is_empty(),
+            "expected no resting asks after partial fill, got: {:?}",
+            d.asks
+        );
     }
 }

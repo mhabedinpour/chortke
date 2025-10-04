@@ -1,23 +1,46 @@
-use matching_engine::order::book::{tree_map, Book};
-use matching_engine::order::{Order, Side};
+use clap::{Parser, Subcommand};
+use matching_engine::config;
+
+#[derive(Parser)]
+#[command(name = "chortke", about = "Chortke Trade Engine")]
+struct Cli {
+    #[arg(short, long, default_value = "config.toml")]
+    config_path: String,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Matcher,
+}
+
+fn init_logging(cfg: &config::AppConfig) {
+    match cfg.logger.format {
+        config::LogFormat::JSON => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(cfg.logger.level)
+                .with_current_span(true)
+                .init();
+        }
+        config::LogFormat::COMPACT => {
+            tracing_subscriber::fmt()
+                .compact()
+                .with_max_level(cfg.logger.level)
+                .init();
+        }
+    }
+}
 
 fn main() {
-    let mut book = tree_map::TreeMap::new();
+    let cli = Cli::parse();
+    let config = config::AppConfig::load(cli.config_path.as_ref()).expect("could not load config");
 
-    book.add(Order::new(1, "1".to_string(), Side::Bid, 1, 1)).expect("could not add order");
-    book.add(Order::new(2, "2".to_string(), Side::Bid, 2, 1)).expect("could not add order");
+    init_logging(&config);
 
-    book.add(Order::new(3, "3".to_string(), Side::Ask, 1, 1)).expect("could not add order");
-    book.add(Order::new(4, "4".to_string(), Side::Ask, 2, 1)).expect("could not add order");
-    book.add(Order::new(5, "5".to_string(), Side::Ask, 2, 1)).expect("could not add order");
-
-    println!("{:?}", book.depth(10));
-
-    book.cancel(2).expect("could not cancel order");
-    book.cancel(5).expect("could not cancel order");
-    println!("{:?}", book.depth(10));
-
-    let trades = book.match_orders();
-    println!("{:?}", trades);
-    println!("{:?}", book.depth(10));
+    match cli.command {
+        Commands::Matcher => println!("{config:?}"),
+    }
 }

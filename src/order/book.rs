@@ -38,7 +38,6 @@ pub enum Error {
 }
 
 // TODO: add prometheus metrics
-// TODO: think more about error handling
 
 /// The core order book interface. Implementors must provide basic operations
 /// for adding, canceling, obtaining depth, and matching orders.

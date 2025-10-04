@@ -2,7 +2,7 @@
 #[derive(Debug, Copy, Clone)]
 pub enum Side {
     Bid,
-    Ask
+    Ask,
 }
 
 /// The current lifecycle status of an order.
@@ -13,7 +13,7 @@ pub enum Status {
     /// The order has been completely executed.
     Executed,
     /// The order was canceled by the client and removed from the book.
-    Canceled
+    Canceled,
 }
 
 /// Unique order identifier.
