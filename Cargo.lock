@@ -74,6 +74,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd1289c04a9ea8cb22300a459a72a385d7c73d3259e2ed7dcb2af674838cfa9"
 
 [[package]]
+name = "chortke"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "figment",
+ "serde",
+ "slab",
+ "thiserror",
+ "time",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,20 +213,6 @@ name = "log"
 version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
-
-[[package]]
-name = "matching-engine"
-version = "0.1.0"
-dependencies = [
- "clap",
- "figment",
- "serde",
- "slab",
- "thiserror",
- "time",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "memchr"

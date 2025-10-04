@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use matching_engine::config;
+use chortke::config;
 
 #[derive(Parser)]
 #[command(name = "chortke", about = "Chortke Trade Engine")]
