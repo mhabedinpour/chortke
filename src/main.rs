@@ -1,5 +1,5 @@
+use chortke::{api, config};
 use clap::{Parser, Subcommand};
-use chortke::config;
 
 #[derive(Parser)]
 #[command(name = "chortke", about = "Chortke Trade Engine")]
@@ -34,13 +34,18 @@ fn init_logging(cfg: &config::AppConfig) {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     let config = config::AppConfig::load(cli.config_path.as_ref()).expect("could not load config");
 
     init_logging(&config);
 
     match cli.command {
-        Commands::Matcher => println!("{config:?}"),
+        Commands::Matcher => {
+            api::start(&config.api)
+                .await
+                .expect("could not start API server");
+        }
     }
 }
