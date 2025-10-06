@@ -15,3 +15,9 @@ tracing-subscriber = { version = "0.3.20", features = ["json"] }
 axum = "0.8.6"
 tokio = { version = "1.47.1", features = ["full"] }
 serde_json = "1.0.145"
+tower = "0.5.2"
+tower-http = { version = "0.6", features = ["trace", "request-id", "util"] }
+http = "1.3.1"
+uuid = { version = "1", features = ["v4"] }
+axum-prometheus = "0.9.0"
+
