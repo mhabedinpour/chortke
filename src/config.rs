@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
@@ -80,7 +80,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(config_path: &Path) -> Result<Self, figment::Error> {
+    pub fn load(config_path: &Path) -> Result<Self, Box<figment::Error>> {
         let mut figment = Figment::from(Serialized::defaults(AppConfig::default()));
 
         if config_path.exists() {
