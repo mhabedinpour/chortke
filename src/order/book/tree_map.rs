@@ -147,7 +147,7 @@ impl Book for TreeMap {
     /// Insert a new order into the book at its price level.
     fn add(&mut self, order: Order) -> Result<(), Error> {
         if self.order_indexes.contains_key(&order.id) {
-            return Err(Error::OrderExists(order.id));
+            return Err(Error::OrderExists(order.client_id)); // TODO: use client_id
         }
 
         let idx = self.orders.insert(OrderNode {
@@ -171,7 +171,7 @@ impl Book for TreeMap {
     fn cancel(&mut self, id: Id) -> Result<(), Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
-            return Err(Error::OrderNotFound(id));
+            return Err(Error::OrderNotFound(id.to_string())); // TODO: use client_id
         }
 
         self.remove_order_from_level(*idx.unwrap());

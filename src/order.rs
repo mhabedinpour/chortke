@@ -1,12 +1,16 @@
+use serde::{Deserialize, Serialize};
+
 /// The side of the order: Bid to buy, Ask to sell.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Bid,
     Ask,
 }
 
 /// The current lifecycle status of an order.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Status {
     /// The order is active on the book and can be matched.
     Open,
@@ -26,7 +30,7 @@ pub type Price = u64; // ticks
 pub type Volume = u64;
 
 /// An order submitted by a client to buy or sell a quantity at a limit price.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Order {
     pub id: Id,
     pub client_id: ClientId,

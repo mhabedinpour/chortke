@@ -297,6 +297,7 @@ dependencies = [
  "http",
  "metrics-exporter-prometheus",
  "serde",
+ "serde_json",
  "slab",
  "thiserror",
  "time",

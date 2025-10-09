@@ -10,6 +10,8 @@ use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 
 pub mod layers;
 mod utils;
+mod orders;
+mod error;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -24,10 +26,14 @@ pub async fn start(
     cfg: &config::ApiConfig,
     cancellation_token: CancellationToken,
 ) -> Result<(), ApiError> {
+    let api_router = Router::new()
+        .merge(orders::router());
+
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
     let app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(|| async move { prom_handle.render() }))
+        .nest("/api/v1", api_router)
         .layer(cors())
         .layer(axum_metrics::MetricLayer::default())
         .layer(tracing())
