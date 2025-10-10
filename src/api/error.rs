@@ -69,4 +69,3 @@ impl IntoResponse for Error {
     }
 }
 
-// TODO: validation, swagger

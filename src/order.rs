@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// The side of the order: Bid to buy, Ask to sell.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Bid,
@@ -9,7 +10,7 @@ pub enum Side {
 }
 
 /// The current lifecycle status of an order.
-#[derive(Debug, Copy, Clone, Serialize)]
+#[derive(Debug, Copy, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Status {
     /// The order is active on the book and can be matched.
@@ -30,7 +31,7 @@ pub type Price = u64; // ticks
 pub type Volume = u64;
 
 /// An order submitted by a client to buy or sell a quantity at a limit price.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Order {
     pub id: Id,
     pub client_id: ClientId,
