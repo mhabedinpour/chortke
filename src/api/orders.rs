@@ -1,15 +1,19 @@
 use crate::api::error::Error;
+use crate::api::validation::ValidatedJson;
 use crate::order;
 use axum::extract::Path;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use validify::{Payload, Validify};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validify, Payload)]
 pub struct PlaceOrderRequest {
     pub client_id: order::ClientId,
     pub side: order::Side,
+    #[validate(range(min = 1.0))]
     pub price: order::Price,
+    #[validate(range(min = 1.0))]
     pub volume: order::Volume,
 }
 
@@ -27,14 +31,12 @@ pub fn router() -> Router {
 }
 
 async fn place_order(
-    Json(order): Json<PlaceOrderRequest>,
+    ValidatedJson(order): ValidatedJson<PlaceOrderRequest>,
 ) -> Result<Json<order::Order>, Error> {
     Ok(Json(order.into()))
 }
 
-async fn cancel_order(
-    Path(client_id): Path<order::ClientId>,
-) -> Result<Json<order::Order>, Error> {
+async fn cancel_order(Path(client_id): Path<order::ClientId>) -> Result<Json<order::Order>, Error> {
     Err(order::book::Error::OrderNotFound(client_id).into())
 }
 

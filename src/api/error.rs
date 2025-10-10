@@ -3,14 +3,16 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use tracing::{Level, enabled, error};
+use validify::ValidationErrors;
 
 pub type Code = String;
 pub type Message = String;
 
 #[derive(Debug)]
-pub(crate) enum Error {
+pub enum Error {
     NotFound(Code, Message),
     BadRequest(Code, Message),
+    Validation(ValidationErrors),
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -34,6 +36,13 @@ impl IntoResponse for Error {
         let (status, code, msg) = match self {
             Error::NotFound(code, msg) => (StatusCode::NOT_FOUND, code, msg),
             Error::BadRequest(code, msg) => (StatusCode::BAD_REQUEST, code, msg),
+            Error::Validation(validation_errors) => {
+                let body = Json(serde_json::json!({
+                    "error": { "code": "VALIDATION_ERROR", "errors": validation_errors }
+                }));
+
+                return (StatusCode::BAD_REQUEST, body).into_response();
+            }
             Error::Internal(err) => {
                 error!("internal error: {}", err);
 

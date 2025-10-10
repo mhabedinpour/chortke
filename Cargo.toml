@@ -21,4 +21,6 @@ axum-metrics = "0.2.0"
 metrics-exporter-prometheus = "0.17.2"
 tokio-util = "0.7.15"
 serde_json = "1.0.145"
+axum-valid = { version = "0.24.0", default-features = false, features = ["validify", "basic"] }
+validify = "2.0.0"
 

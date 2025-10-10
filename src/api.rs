@@ -8,10 +8,11 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 
-pub mod layers;
-mod utils;
-mod orders;
 mod error;
+pub mod layers;
+mod orders;
+mod utils;
+mod validation;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -26,8 +27,7 @@ pub async fn start(
     cfg: &config::ApiConfig,
     cancellation_token: CancellationToken,
 ) -> Result<(), ApiError> {
-    let api_router = Router::new()
-        .merge(orders::router());
+    let api_router = Router::new().merge(orders::router());
 
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
     let app = Router::new()
