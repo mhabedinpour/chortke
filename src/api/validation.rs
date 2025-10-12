@@ -1,3 +1,8 @@
+//! Request extractors and validation utilities for the API.
+//!
+//! Provides a wrapper around JSON payloads that performs schema validation
+//! using the `validify` ecosystem and maps errors to uniform API errors.
+
 use crate::api::error::Error;
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -5,6 +10,7 @@ use axum::extract::{FromRequest, Request};
 use axum_valid::{ValidationRejection, Validified};
 use validify::ValidationErrors;
 
+/// Wrapper extractor that parses JSON and validates it.
 pub struct ValidatedJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for ValidatedJson<T>

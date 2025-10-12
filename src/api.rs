@@ -1,3 +1,10 @@
+//! Public HTTP API for the matching engine.
+//!
+//! This module wires together the Axum router, middleware layers, and OpenAPI docs
+//! to expose the versioned REST API under the "/api/v1" prefix, a Prometheus
+//! metrics endpoint under "/metrics", a simple health check under "/health",
+//! and Swagger UI under "/docs".
+
 use crate::config;
 use axum::Router;
 use axum::routing::get;
@@ -15,6 +22,7 @@ mod orders;
 mod utils;
 mod validation;
 
+/// OpenAPI documentation declaration for the public API.
 #[derive(OpenApi)]
 #[openapi(
     info(title = "Matching Engine API", version = "1.0.0"),
@@ -24,15 +32,24 @@ mod validation;
 )]
 pub struct ApiDoc;
 
+/// Errors that may occur while bootstrapping the API service.
 #[derive(Error, Debug)]
 pub enum ApiError {
+    /// Prometheus metrics recorder initialization failed.
     #[error("Failed to setup Prometheus recorder: {0}")]
     PrometheusSetup(#[from] metrics_exporter_prometheus::BuildError),
 
+    /// A generic IO error while binding or serving.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// Start the HTTP API server.
+///
+/// - Binds on cfg.host:cfg.port
+/// - Serves Swagger UI at /docs backed by OpenAPI JSON at /api-docs/openapi.json
+/// - Exposes health at /health and Prometheus metrics at /metrics
+/// - Nests versioned routes under /api/v1
 pub async fn start(
     cfg: &config::ApiConfig,
     cancellation_token: CancellationToken,

@@ -25,17 +25,32 @@ impl Default for ApiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Log output format for the application logger.
+///
+/// - COMPACT: human-readable, single-line logs suited for local development.
+/// - JSON: structured JSON logs suitable for log aggregation systems.
 pub enum LogFormat {
+    /// Human-readable, single-line compact format.
     COMPACT,
+    /// Structured JSON format for machine processing.
     JSON,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Logging verbosity level. Maps 1:1 to `tracing` LevelFilter.
+///
+/// Use higher levels (ERROR/WARN) in production to reduce noise, and lower
+/// levels (INFO/DEBUG/TRACE) during development or troubleshooting.
 pub enum LogLevel {
+    /// Extremely verbose, includes fine-grained diagnostic events.
     TRACE,
+    /// Verbose information helpful during debugging.
     DEBUG,
+    /// General operational information about application progress.
     INFO,
+    /// Potentially harmful situations that warrant attention.
     WARN,
+    /// Error events that might still allow the application to continue.
     ERROR,
 }
 
@@ -52,8 +67,14 @@ impl From<LogLevel> for LevelFilter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Logger configuration section.
+///
+/// Controls how logs are formatted and the minimum severity captured.
+/// Can be provided via config file or environment variables.
 pub struct LogConfig {
+    /// Minimum severity to record (e.g., INFO, DEBUG). Higher severity means fewer logs.
     pub level: LogLevel,
+    /// Output format for emitted logs (compact or JSON).
     pub format: LogFormat,
 }
 

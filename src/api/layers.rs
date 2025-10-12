@@ -1,3 +1,5 @@
+//! Common HTTP middleware layers used by the API service.
+
 use crate::api::utils;
 use axum::body::Body;
 use axum::response::Response;
@@ -12,12 +14,15 @@ use tower_http::trace::{
 use tracing::{Level, Span};
 use uuid::Uuid;
 
+/// Create a permissive CORS layer allowing any origin and HTTP method.
 pub fn cors() -> CorsLayer {
     CorsLayer::new().allow_methods(Any {}).allow_origin(Any {})
 }
 
+/// Header used to propagate a request-id across services.
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
+/// Generator of UUIDv4 request IDs used by SetRequestIdLayer.
 #[derive(Clone, Default)]
 pub struct MakeRequestUuid;
 
@@ -28,6 +33,7 @@ impl MakeRequestId for MakeRequestUuid {
     }
 }
 
+/// Configure request/response tracing with structured spans and logs.
 #[allow(clippy::type_complexity)]
 pub fn tracing() -> TraceLayer<
     HttpMakeClassifier,

@@ -1,3 +1,8 @@
+//! Order-related HTTP endpoints.
+//!
+//! Defines request/response types and routes for placing, canceling, and querying
+//! orders.
+
 use crate::api::error::Error;
 use crate::api::validation::ValidatedJson;
 use crate::order;
@@ -8,6 +13,7 @@ use serde::Deserialize;
 use utoipa::{OpenApi, ToSchema};
 use validify::{Payload, Validify};
 
+/// Request body for placing a new order.
 #[derive(Debug, Deserialize, Validify, Payload, ToSchema)]
 pub struct PlaceOrderRequest {
     pub client_id: order::ClientId,
@@ -24,6 +30,7 @@ impl From<PlaceOrderRequest> for order::Order {
     }
 }
 
+/// OpenAPI fragment for orders endpoints, included under /api/v1.
 #[derive(OpenApi)]
 #[openapi(
     paths(place_order, cancel_order, order_by_client_id),
