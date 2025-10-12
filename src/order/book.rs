@@ -6,6 +6,7 @@
 pub mod tree_map;
 
 use crate::order::{ClientId, Id, Order, Price, Volume};
+use crate::user;
 use thiserror::Error;
 
 /// Aggregated depth at a single price level.
@@ -29,12 +30,18 @@ pub struct Depth {
 /// Generic order-book errors.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("could not find order #{0}")]
+    #[error("could not find order with id #{0}")]
     /// Tried to operate on an order that does not exist.
-    OrderNotFound(ClientId),
+    OrderIdNotFound(Id),
     #[error("another order with the same id #{0} already exists")]
     /// Tried to add an order with an ID that already exists.
-    OrderExists(ClientId),
+    OrderIdExists(Id),
+    #[error("could not find order with client id #{0}")]
+    /// Tried to operate on an order that does not exist.
+    OrderClientIdNotFound(ClientId),
+    #[error("another order with the same client id #{0} already exists")]
+    /// Tried to add an order with a client ID that already exists.
+    OrderClientIdExists(ClientId),
 }
 
 // TODO: add prometheus metrics
@@ -42,10 +49,12 @@ pub enum Error {
 /// The core order book interface. Implementors must provide basic operations
 /// for adding, canceling, obtaining depth, and matching orders.
 pub trait Book {
-    /// Add a new order to the book. Returns an error if the ID already exists.
+    /// Add a new order to the book. Returns an error if the ID/Client ID already exists.
     fn add(&mut self, order: Order) -> Result<(), Error>;
     /// Cancel an existing order by its ID.
     fn cancel(&mut self, id: Id) -> Result<(), Error>;
+    /// Cancel an existing order by its Client ID.
+    fn cancel_by_client_id(&mut self, user_id: user::Id, client_id: ClientId) -> Result<(), Error>;
     /// Returns a depth snapshot for the requested number of price levels per side.
     fn depth(&self, limit: usize) -> Depth;
     /// Matches orders until no more crossing prices remain, returning generated trades.

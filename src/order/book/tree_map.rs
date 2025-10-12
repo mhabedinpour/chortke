@@ -7,7 +7,7 @@
 //! performed by crossing the best bid and best ask while prices overlap.
 
 use crate::order::book::{Book, Depth, DepthItem, Error};
-use crate::order::{Id, Order, Price, Side, Volume};
+use crate::order::{ClientId, Id, Order, Price, Side, Volume};
 use crate::trade::Trade;
 use slab::Slab;
 use std::cmp;
@@ -75,8 +75,6 @@ impl PriceLevel {
 #[derive(Debug)]
 struct OrderNode {
     order: Order,
-    /// Sequence number assigned on insertion for time-priority comparison.
-    seq: usize,
     next: Option<usize>,
     prev: Option<usize>,
 }
@@ -88,7 +86,7 @@ pub struct TreeMap {
     asks: BTreeMap<Price, PriceLevel>,
     orders: Slab<OrderNode>,
     order_indexes: HashMap<Id, usize>,
-    last_seq: usize,
+    client_id_order_indexes: HashMap<String, usize>,
 }
 
 impl TreeMap {
@@ -103,6 +101,8 @@ impl TreeMap {
         let price = self.orders[idx].order.price;
         let side = self.orders[idx].order.side;
         self.order_indexes.remove(&self.orders[idx].order.id);
+        self.client_id_order_indexes
+            .remove(&self.orders[idx].order.user_client_id());
         let level = match side {
             Side::Bid => self.bids.get_mut(&price).unwrap(),
             Side::Ask => self.asks.get_mut(&price).unwrap(),
@@ -147,22 +147,28 @@ impl Book for TreeMap {
     /// Insert a new order into the book at its price level.
     fn add(&mut self, order: Order) -> Result<(), Error> {
         if self.order_indexes.contains_key(&order.id) {
-            return Err(Error::OrderExists(order.client_id)); // TODO: use client_id
+            return Err(Error::OrderIdExists(order.id));
+        }
+        if self
+            .client_id_order_indexes
+            .contains_key(&order.user_client_id())
+        {
+            return Err(Error::OrderClientIdExists(order.client_id));
         }
 
         let idx = self.orders.insert(OrderNode {
             order,
-            seq: self.last_seq,
             next: None,
             prev: None,
         });
         self.order_indexes.insert(self.orders[idx].order.id, idx);
+        self.client_id_order_indexes
+            .insert(self.orders[idx].order.user_client_id(), idx);
         let level = match self.orders[idx].order.side {
             Side::Bid => self.bids.entry(self.orders[idx].order.price).or_default(),
             Side::Ask => self.asks.entry(self.orders[idx].order.price).or_default(),
         };
         level.push(&mut self.orders, idx);
-        self.last_seq += 1;
 
         Ok(())
     }
@@ -171,7 +177,25 @@ impl Book for TreeMap {
     fn cancel(&mut self, id: Id) -> Result<(), Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
-            return Err(Error::OrderNotFound(id.to_string())); // TODO: use client_id
+            return Err(Error::OrderIdNotFound(id));
+        }
+
+        self.remove_order_from_level(*idx.unwrap());
+
+        Ok(())
+    }
+
+    /// Cancel an existing order by client id.
+    fn cancel_by_client_id(
+        &mut self,
+        user_id: crate::user::Id,
+        client_id: ClientId,
+    ) -> Result<(), Error> {
+        let idx = self
+            .client_id_order_indexes
+            .get(&Order::format_user_client_id(&user_id, &client_id));
+        if idx.is_none() {
+            return Err(Error::OrderClientIdNotFound(client_id));
         }
 
         self.remove_order_from_level(*idx.unwrap());
@@ -239,7 +263,7 @@ impl Book for TreeMap {
                     self.orders[ask_idx].order.remaining_volume(),
                 );
                 let (trade_price, is_bid_maker) =
-                    if self.orders[bid_idx].seq < self.orders[ask_idx].seq {
+                    if self.orders[bid_idx].order.id < self.orders[ask_idx].order.id {
                         (self.orders[bid_idx].order.price, true)
                     } else {
                         (self.orders[ask_idx].order.price, false)
@@ -266,11 +290,12 @@ impl Book for TreeMap {
 #[cfg(test)]
 mod tests {
     use super::TreeMap;
-    use crate::order::book::{Book, DepthItem};
+    use crate::order::Id;
+    use crate::order::book::{Book, DepthItem, Error};
     use crate::order::{Order, Side};
 
-    fn o(id: u64, side: Side, price: u64, vol: u64) -> Order {
-        Order::new(id, format!("c{}", id), side, price, vol)
+    fn o(id: Id, side: Side, price: u64, vol: u64) -> Order {
+        Order::new(id, "c".to_string(), format!("c{}", id), side, price, vol)
     }
 
     #[test]
@@ -348,14 +373,14 @@ mod tests {
         // Duplicate id should fail
         let err = book.add(o(10, Side::Ask, 101, 1)).unwrap_err();
         match err {
-            crate::order::book::Error::OrderExists(_) => {}
+            Error::OrderIdExists(_) => {}
             _ => panic!("expected Error::OrderExists for duplicate id, got different error"),
         }
 
         // Cancel unknown id should fail
         let err = book.cancel(999).unwrap_err();
         match err {
-            crate::order::book::Error::OrderNotFound(_) => {}
+            Error::OrderIdNotFound(_) => {}
             _ => panic!("expected Error::OrderNotFound for unknown id, got different error"),
         }
     }
@@ -873,5 +898,65 @@ mod tests {
             "expected no resting asks after partial fill, got: {:?}",
             d.asks
         );
+    }
+
+    #[test]
+    fn cancel_by_client_id_success_and_not_found() {
+        let mut book = TreeMap::new();
+
+        // Two orders for same user with distinct client ids
+        let user = "u1".to_string();
+        let o1 = Order::new(1, user.clone(), "c1".to_string(), Side::Bid, 100, 5);
+        let o2 = Order::new(2, user.clone(), "c2".to_string(), Side::Ask, 101, 3);
+        book.add(o1).unwrap();
+        book.add(o2).unwrap();
+
+        // Cancel first by client id
+        book.cancel_by_client_id(user.clone(), "c1".to_string())
+            .unwrap();
+
+        // Depth should only reflect the remaining ask side
+        let d = book.depth(10);
+        assert_eq!(
+            d.bids.len(),
+            0,
+            "expected no bids after cancel by client id"
+        );
+        assert_eq!(d.asks.len(), 1, "expected one ask level remaining");
+        assert_eq!(d.asks[0].price, 101);
+        assert_eq!(d.asks[0].volume, 3);
+
+        // Canceling a non-existing (user, client_id) should error
+        let err = book
+            .cancel_by_client_id(user.clone(), "does-not-exist".to_string())
+            .unwrap_err();
+        match err {
+            Error::OrderClientIdNotFound(cid) => assert_eq!(cid, "does-not-exist"),
+            other => panic!("expected OrderClientIdNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_client_id_is_per_user() {
+        let mut book = TreeMap::new();
+
+        // Same user and same client id -> should be rejected on second add
+        let user1 = "alice".to_string();
+        let cid = "alpha".to_string();
+        let a1 = Order::new(10, user1.clone(), cid.clone(), Side::Bid, 100, 1);
+        book.add(a1).unwrap();
+
+        let a2 = Order::new(11, user1.clone(), cid.clone(), Side::Ask, 101, 2);
+        let err = book.add(a2).unwrap_err();
+        match err {
+            Error::OrderClientIdExists(got) => assert_eq!(got, cid),
+            other => panic!("expected OrderClientIdExists, got {:?}", other),
+        }
+
+        // Different user can reuse the same client id
+        let user2 = "bob".to_string();
+        let b1 = Order::new(12, user2.clone(), cid.clone(), Side::Bid, 99, 3);
+        // This should succeed because uniqueness is (user_id, client_id)
+        book.add(b1).unwrap();
     }
 }

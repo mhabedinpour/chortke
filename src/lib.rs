@@ -4,3 +4,5 @@ pub mod api;
 pub mod config;
 pub mod order;
 pub mod trade;
+
+pub mod user;

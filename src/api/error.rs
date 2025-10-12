@@ -32,13 +32,21 @@ pub enum Error {
 impl From<order::book::Error> for Error {
     fn from(value: order::book::Error) -> Self {
         match value {
-            order::book::Error::OrderNotFound(client_id) => Error::NotFound(
+            order::book::Error::OrderIdNotFound(id) => Error::NotFound(
                 "ORDER_NOT_FOUND".into(),
-                format!("order with client_id {} not found", client_id),
+                format!("order with id {} not found", id),
             ),
-            order::book::Error::OrderExists(client_id) => Error::BadRequest(
+            order::book::Error::OrderIdExists(id) => Error::BadRequest(
                 "ORDER_ALREADY_EXISTS".into(),
-                format!("order with client_id {} already exists", client_id),
+                format!("order with id {} already exists", id),
+            ),
+            order::book::Error::OrderClientIdNotFound(client_id) => Error::NotFound(
+                "ORDER_NOT_FOUND".into(),
+                format!("order with client id {} not found", client_id),
+            ),
+            order::book::Error::OrderClientIdExists(client_id) => Error::BadRequest(
+                "ORDER_ALREADY_EXISTS".into(),
+                format!("order with client id {} already exists", client_id),
             ),
         }
     }
@@ -91,7 +99,7 @@ mod tests {
 
     #[test]
     fn maps_order_errors() {
-        let e1: Error = order::book::Error::OrderNotFound("abc".into()).into();
+        let e1: Error = order::book::Error::OrderClientIdNotFound("abc".into()).into();
         match e1 {
             Error::NotFound(code, msg) => {
                 assert_eq!(code, "ORDER_NOT_FOUND");
@@ -100,7 +108,7 @@ mod tests {
             _ => panic!("expected NotFound"),
         }
 
-        let e2: Error = order::book::Error::OrderExists("xyz".into()).into();
+        let e2: Error = order::book::Error::OrderClientIdExists("xyz".into()).into();
         match e2 {
             Error::BadRequest(code, msg) => {
                 assert_eq!(code, "ORDER_ALREADY_EXISTS");

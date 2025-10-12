@@ -5,7 +5,7 @@
 
 use crate::api::error::Error;
 use crate::api::validation::ValidatedJson;
-use crate::order;
+use crate::{order, user};
 use axum::extract::Path;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -16,6 +16,7 @@ use validify::{Payload, Validify};
 /// Request body for placing a new order.
 #[derive(Debug, Deserialize, Validify, Payload, ToSchema)]
 pub struct PlaceOrderRequest {
+    pub user_id: user::Id,
     pub client_id: order::ClientId,
     pub side: order::Side,
     #[validate(range(min = 1.0))]
@@ -26,7 +27,14 @@ pub struct PlaceOrderRequest {
 
 impl From<PlaceOrderRequest> for order::Order {
     fn from(value: PlaceOrderRequest) -> Self {
-        order::Order::new(0, value.client_id, value.side, value.price, value.volume)
+        order::Order::new(
+            0,
+            value.user_id,
+            value.client_id,
+            value.side,
+            value.price,
+            value.volume,
+        )
     }
 }
 
@@ -76,7 +84,7 @@ async fn place_order(
     )
 )]
 async fn cancel_order(Path(client_id): Path<order::ClientId>) -> Result<Json<order::Order>, Error> {
-    Err(order::book::Error::OrderNotFound(client_id).into())
+    Err(order::book::Error::OrderClientIdNotFound(client_id).into())
 }
 
 /// Get an order by client id
@@ -95,6 +103,6 @@ async fn order_by_client_id(
     Path(client_id): Path<order::ClientId>,
 ) -> Result<Json<order::Order>, Error> {
     Err(Error::Internal(Box::new(
-        order::book::Error::OrderNotFound(client_id),
+        order::book::Error::OrderClientIdNotFound(client_id),
     )))
 }
