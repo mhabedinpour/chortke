@@ -84,3 +84,75 @@ impl IntoResponse for Error {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::StatusCode;
+
+    #[test]
+    fn maps_order_errors() {
+        let e1: Error = order::book::Error::OrderNotFound("abc".into()).into();
+        match e1 {
+            Error::NotFound(code, msg) => {
+                assert_eq!(code, "ORDER_NOT_FOUND");
+                assert!(msg.contains("abc"));
+            }
+            _ => panic!("expected NotFound"),
+        }
+
+        let e2: Error = order::book::Error::OrderExists("xyz".into()).into();
+        match e2 {
+            Error::BadRequest(code, msg) => {
+                assert_eq!(code, "ORDER_ALREADY_EXISTS");
+                assert!(msg.contains("xyz"));
+            }
+            _ => panic!("expected BadRequest"),
+        }
+    }
+
+    #[test]
+    fn into_response_basic_shapes() {
+        // NotFound
+        let res = Error::NotFound("NOT".into(), "missing".into()).into_response();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = body_to_json(res);
+        assert_eq!(body["error"]["code"], "NOT");
+        assert_eq!(body["error"]["message"], "missing");
+
+        // BadRequest
+        let res = Error::BadRequest("BAD".into(), "oops".into()).into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_json(res);
+        assert_eq!(body["error"]["code"], "BAD");
+        assert_eq!(body["error"]["message"], "oops");
+
+        // Internal (message content may vary with log level)
+        let err = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let res = Error::Internal(Box::new(err)).into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_to_json(res);
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+        assert!(body["error"]["message"].is_string());
+    }
+
+    #[test]
+    fn into_response_validation() {
+        let ve = ValidationErrors::new();
+        // create a fake field error shape via serde-json since constructing real
+        // validify errors is cumbersome for unit testing the response shape
+        let res = Error::Validation(ve).into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_json(res);
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+        assert!(body["error"].get("errors").is_some());
+    }
+
+    fn body_to_json(res: Response) -> serde_json::Value {
+        use axum::body::to_bytes;
+        use tokio::runtime::Runtime;
+
+        let rt = Runtime::new().unwrap();
+        let bytes = rt.block_on(async move { to_bytes(res.into_body(), 64 * 1024).await.unwrap() });
+        serde_json::from_slice(&bytes).unwrap()
+    }
+}
