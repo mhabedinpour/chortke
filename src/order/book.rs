@@ -6,7 +6,6 @@
 pub mod tree_map;
 
 use crate::order::{ClientId, Id, Order, Price, Volume};
-use crate::user;
 use thiserror::Error;
 
 /// Aggregated depth at a single price level.
@@ -48,15 +47,13 @@ pub enum Error {
 
 /// The core order book interface. Implementors must provide basic operations
 /// for adding, canceling, obtaining depth, and matching orders.
-pub trait Book {
-    /// Add a new order to the book. Returns an error if the ID/Client ID already exists.
+pub trait HotBook {
+    /// Add a new order to the book. Returns an error if the ID already exists.
     fn add(&mut self, order: Order) -> Result<(), Error>;
     /// Cancel an existing order by its ID.
-    fn cancel(&mut self, id: Id) -> Result<(), Error>;
-    /// Cancel an existing order by its Client ID.
-    fn cancel_by_client_id(&mut self, user_id: user::Id, client_id: ClientId) -> Result<(), Error>;
+    fn cancel(&mut self, id: Id) -> Result<Order, Error>;
     /// Returns a depth snapshot for the requested number of price levels per side.
     fn depth(&self, limit: usize) -> Depth;
-    /// Matches orders until no more crossing prices remain, returning generated trades.
-    fn match_orders(&mut self) -> Vec<crate::trade::Trade>;
+    /// Matches orders until no more crossing prices remain, returning generated trades and closed orders.
+    fn match_orders(&mut self) -> (Vec<crate::trade::Trade>, Vec<Order>);
 }

@@ -6,8 +6,8 @@
 //! allocations and allowing O(1) insertion/removal within a level. Matching is
 //! performed by crossing the best bid and best ask while prices overlap.
 
-use crate::order::book::{Book, Depth, DepthItem, Error};
-use crate::order::{ClientId, Id, Order, Price, Side, Volume};
+use crate::order::book::{Depth, DepthItem, Error, HotBook};
+use crate::order::{Id, Order, Price, Side, Status, Volume};
 use crate::trade::Trade;
 use slab::Slab;
 use std::cmp;
@@ -86,7 +86,6 @@ pub struct TreeMap {
     asks: BTreeMap<Price, PriceLevel>,
     orders: Slab<OrderNode>,
     order_indexes: HashMap<Id, usize>,
-    client_id_order_indexes: HashMap<String, usize>,
 }
 
 impl TreeMap {
@@ -97,33 +96,35 @@ impl TreeMap {
 
     /// Remove an order (by slab index) from its corresponding price level and
     /// delete it from the book, cleaning up empty price levels.
-    fn remove_order_from_level(&mut self, idx: usize) {
-        let price = self.orders[idx].order.price;
+    fn remove_order_from_level(&mut self, idx: usize) -> Order {
         let side = self.orders[idx].order.side;
-        self.order_indexes.remove(&self.orders[idx].order.id);
-        self.client_id_order_indexes
-            .remove(&self.orders[idx].order.user_client_id());
+        let price = self.orders[idx].order.price;
+
         let level = match side {
             Side::Bid => self.bids.get_mut(&price).unwrap(),
             Side::Ask => self.asks.get_mut(&price).unwrap(),
         };
         level.remove(&mut self.orders, idx);
-        self.orders.remove(idx);
         if level.total_orders == 0 {
             match side {
                 Side::Bid => self.bids.remove(&price),
                 Side::Ask => self.asks.remove(&price),
             };
         }
+
+        let node = self.orders.remove(idx);
+        self.order_indexes.remove(&node.order.id);
+        node.order
     }
 
     /// Reduce (and possibly remove) orders from the given price level by a
     /// target `volume`, walking from the head to preserve FIFO. Panics if
     /// `volume` exceeds the level's total available volume.
-    fn remove_by_volume(&mut self, level: &mut PriceLevel, volume: Volume) {
+    fn remove_by_volume(&mut self, level: &mut PriceLevel, volume: Volume) -> Vec<Order> {
         assert!(volume <= level.total_volume);
 
         let mut remaining_volume = volume;
+        let mut closed_orders = Vec::new();
         while remaining_volume > 0 && level.total_volume > 0 {
             let idx = level.head.unwrap();
 
@@ -131,7 +132,10 @@ impl TreeMap {
             // remaining volume, remove the order completely and continue.
             if self.orders[idx].order.remaining_volume() <= remaining_volume {
                 remaining_volume -= self.orders[idx].order.remaining_volume();
-                self.remove_order_from_level(idx);
+                let mut closed_order = self.remove_order_from_level(idx);
+                closed_order.executed_volume = closed_order.volume;
+                closed_order.status = Status::Executed;
+                closed_orders.push(closed_order);
                 continue;
             }
 
@@ -140,20 +144,16 @@ impl TreeMap {
             self.orders[idx].order.executed_volume += remaining_volume;
             break;
         }
+
+        closed_orders
     }
 }
 
-impl Book for TreeMap {
+impl HotBook for TreeMap {
     /// Insert a new order into the book at its price level.
     fn add(&mut self, order: Order) -> Result<(), Error> {
         if self.order_indexes.contains_key(&order.id) {
             return Err(Error::OrderIdExists(order.id));
-        }
-        if self
-            .client_id_order_indexes
-            .contains_key(&order.user_client_id())
-        {
-            return Err(Error::OrderClientIdExists(order.client_id));
         }
 
         let idx = self.orders.insert(OrderNode {
@@ -162,8 +162,6 @@ impl Book for TreeMap {
             prev: None,
         });
         self.order_indexes.insert(self.orders[idx].order.id, idx);
-        self.client_id_order_indexes
-            .insert(self.orders[idx].order.user_client_id(), idx);
         let level = match self.orders[idx].order.side {
             Side::Bid => self.bids.entry(self.orders[idx].order.price).or_default(),
             Side::Ask => self.asks.entry(self.orders[idx].order.price).or_default(),
@@ -174,33 +172,15 @@ impl Book for TreeMap {
     }
 
     /// Cancel an existing order by id.
-    fn cancel(&mut self, id: Id) -> Result<(), Error> {
+    fn cancel(&mut self, id: Id) -> Result<Order, Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
             return Err(Error::OrderIdNotFound(id));
         }
 
-        self.remove_order_from_level(*idx.unwrap());
-
-        Ok(())
-    }
-
-    /// Cancel an existing order by client id.
-    fn cancel_by_client_id(
-        &mut self,
-        user_id: crate::user::Id,
-        client_id: ClientId,
-    ) -> Result<(), Error> {
-        let idx = self
-            .client_id_order_indexes
-            .get(&Order::format_user_client_id(&user_id, &client_id));
-        if idx.is_none() {
-            return Err(Error::OrderClientIdNotFound(client_id));
-        }
-
-        self.remove_order_from_level(*idx.unwrap());
-
-        Ok(())
+        let mut order = self.remove_order_from_level(*idx.unwrap());
+        order.status = Status::Canceled;
+        Ok(order)
     }
 
     /// Return a snapshot of top-of-book depth up to `limit` levels per side.
@@ -231,10 +211,11 @@ impl Book for TreeMap {
     /// Match the best bid and best ask while there is price overlap, producing
     /// trades and updating order states. The trade price follows maker-taker
     /// precedence: the earlier order at the top levels sets the price.
-    fn match_orders(&mut self) -> Vec<Trade> {
+    fn match_orders(&mut self) -> (Vec<Trade>, Vec<Order>) {
         let asks_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.asks;
         let bids_ptr: *mut BTreeMap<Price, PriceLevel> = &mut self.bids;
         let mut trades = Vec::new();
+        let mut closed_orders = Vec::new();
 
         loop {
             let (top_bid_price, top_bid_level) = unsafe {
@@ -277,13 +258,13 @@ impl Book for TreeMap {
                     volume: trade_volume,
                     timestamp: OffsetDateTime::now_utc(),
                 });
-                self.remove_by_volume(top_bid_level, trade_volume);
-                self.remove_by_volume(top_ask_level, trade_volume);
+                closed_orders.append(self.remove_by_volume(top_bid_level, trade_volume).as_mut());
+                closed_orders.append(self.remove_by_volume(top_ask_level, trade_volume).as_mut());
                 volume -= trade_volume;
             }
         }
 
-        trades
+        (trades, closed_orders)
     }
 }
 
@@ -291,7 +272,7 @@ impl Book for TreeMap {
 mod tests {
     use super::TreeMap;
     use crate::order::Id;
-    use crate::order::book::{Book, DepthItem, Error};
+    use crate::order::book::{DepthItem, Error, HotBook};
     use crate::order::{Order, Side};
 
     fn o(id: Id, side: Side, price: u64, vol: u64) -> Order {
@@ -461,7 +442,7 @@ mod tests {
         book.add(o(1, Side::Bid, 101, 5)).unwrap();
         book.add(o(2, Side::Ask, 100, 5)).unwrap();
 
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             1,
@@ -491,6 +472,26 @@ mod tests {
         ); // maker's price
         assert_eq!(t.volume, 5, "trade volume mismatch: got {}", t.volume);
 
+        // Closed orders should include both fully filled orders (bid then ask)
+        assert_eq!(
+            closed.len(),
+            2,
+            "expected 2 closed orders, got {:?}",
+            closed
+        );
+        assert_eq!(
+            closed[0].id, 1,
+            "first closed should be bid id=1, got {}",
+            closed[0].id
+        );
+        assert_eq!(
+            closed[1].id, 2,
+            "second closed should be ask id=2, got {}",
+            closed[1].id
+        );
+        assert_eq!(closed[0].remaining_volume(), 0);
+        assert_eq!(closed[1].remaining_volume(), 0);
+
         // Book should be empty after full cross
         let d = book.depth(10);
         assert!(
@@ -512,7 +513,7 @@ mod tests {
         book.add(o(10, Side::Ask, 100, 4)).unwrap();
         book.add(o(11, Side::Bid, 101, 4)).unwrap();
 
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             1,
@@ -542,6 +543,18 @@ mod tests {
         ); // maker's price
         assert_eq!(t.volume, 4, "trade volume mismatch: got {}", t.volume);
 
+        // Both orders fully filled; closed should be [bid 11, ask 10]
+        assert_eq!(
+            closed.len(),
+            2,
+            "expected 2 closed orders, got {:?}",
+            closed
+        );
+        assert_eq!(closed[0].id, 11);
+        assert_eq!(closed[1].id, 10);
+        assert_eq!(closed[0].remaining_volume(), 0);
+        assert_eq!(closed[1].remaining_volume(), 0);
+
         let d = book.depth(10);
         assert!(
             d.bids.is_empty(),
@@ -564,7 +577,7 @@ mod tests {
         // One ask that will partially consume both
         book.add(o(3, Side::Ask, 99, 4)).unwrap();
 
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             2,
@@ -623,6 +636,26 @@ mod tests {
             trades[1].price
         );
 
+        // Closed orders: bid id=1 fully filled first, ask id=3 fully filled second
+        assert_eq!(
+            closed.len(),
+            2,
+            "expected 2 closed orders, got {:?}",
+            closed
+        );
+        assert_eq!(
+            closed[0].id, 1,
+            "first closed should be bid id=1, got {}",
+            closed[0].id
+        );
+        assert_eq!(
+            closed[1].id, 3,
+            "second closed should be ask id=3, got {}",
+            closed[1].id
+        );
+        assert_eq!(closed[0].remaining_volume(), 0);
+        assert_eq!(closed[1].remaining_volume(), 0);
+
         // Remaining depth: bid at 100 with volume 1; no asks
         let d = book.depth(10);
         assert_eq!(
@@ -665,11 +698,16 @@ mod tests {
         book.add(o(1, Side::Bid, 100, 5)).unwrap();
         book.add(o(2, Side::Ask, 101, 5)).unwrap();
         let d_before = book.depth(10);
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert!(
             trades.is_empty(),
             "expected no trades when no price overlap, got: {:?}",
             trades
+        );
+        assert!(
+            closed.is_empty(),
+            "expected no closed orders, got: {:?}",
+            closed
         );
         let d_after = book.depth(10);
         assert_eq!(
@@ -718,7 +756,7 @@ mod tests {
         book.cancel(1).unwrap();
         // Now cross with an ask that takes 2. It should trade against id=2.
         book.add(o(3, Side::Ask, 99, 2)).unwrap();
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             1,
@@ -747,6 +785,10 @@ mod tests {
             t.price
         );
         assert_eq!(t.volume, 2, "trade volume mismatch, got {}", t.volume);
+        // Closed orders: only the ask (id=3) should be fully filled
+        assert_eq!(closed.len(), 1, "expected 1 closed order, got {:?}", closed);
+        assert_eq!(closed[0].id, 3);
+        assert_eq!(closed[0].remaining_volume(), 0);
         // Remaining at 100: 1
         let d = book.depth(10);
         assert_eq!(
@@ -774,7 +816,7 @@ mod tests {
         // Taker: one large bid that sweeps them
         book.add(o(12, Side::Bid, 103, 10)).unwrap();
 
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             2,
@@ -833,6 +875,18 @@ mod tests {
             trades[1].volume
         );
 
+        // Closed orders: both ask orders should be closed in price-time order
+        assert_eq!(
+            closed.len(),
+            2,
+            "expected 2 closed orders, got {:?}",
+            closed
+        );
+        assert_eq!(closed[0].id, 10);
+        assert_eq!(closed[1].id, 11);
+        assert_eq!(closed[0].remaining_volume(), 0);
+        assert_eq!(closed[1].remaining_volume(), 0);
+
         // Remaining bid should rest at 103 with volume 5
         let d = book.depth(10);
         assert_eq!(
@@ -857,7 +911,7 @@ mod tests {
         // Bid maker at 100, ask taker at 100 partially fills
         book.add(o(1, Side::Bid, 100, 5)).unwrap();
         book.add(o(2, Side::Ask, 100, 3)).unwrap();
-        let trades = book.match_orders();
+        let (trades, closed) = book.match_orders();
         assert_eq!(
             trades.len(),
             1,
@@ -882,6 +936,10 @@ mod tests {
             "trade volume mismatch at equal price: got {}",
             t.volume
         );
+        // Closed orders: only the ask (id=2) should be fully closed
+        assert_eq!(closed.len(), 1, "expected 1 closed order, got {:?}", closed);
+        assert_eq!(closed[0].id, 2);
+        assert_eq!(closed[0].remaining_volume(), 0);
         // Remaining on bid: 2 at 100
         let d = book.depth(10);
         assert_eq!(
@@ -898,65 +956,5 @@ mod tests {
             "expected no resting asks after partial fill, got: {:?}",
             d.asks
         );
-    }
-
-    #[test]
-    fn cancel_by_client_id_success_and_not_found() {
-        let mut book = TreeMap::new();
-
-        // Two orders for same user with distinct client ids
-        let user = "u1".to_string();
-        let o1 = Order::new(1, user.clone(), "c1".to_string(), Side::Bid, 100, 5);
-        let o2 = Order::new(2, user.clone(), "c2".to_string(), Side::Ask, 101, 3);
-        book.add(o1).unwrap();
-        book.add(o2).unwrap();
-
-        // Cancel first by client id
-        book.cancel_by_client_id(user.clone(), "c1".to_string())
-            .unwrap();
-
-        // Depth should only reflect the remaining ask side
-        let d = book.depth(10);
-        assert_eq!(
-            d.bids.len(),
-            0,
-            "expected no bids after cancel by client id"
-        );
-        assert_eq!(d.asks.len(), 1, "expected one ask level remaining");
-        assert_eq!(d.asks[0].price, 101);
-        assert_eq!(d.asks[0].volume, 3);
-
-        // Canceling a non-existing (user, client_id) should error
-        let err = book
-            .cancel_by_client_id(user.clone(), "does-not-exist".to_string())
-            .unwrap_err();
-        match err {
-            Error::OrderClientIdNotFound(cid) => assert_eq!(cid, "does-not-exist"),
-            other => panic!("expected OrderClientIdNotFound, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn duplicate_client_id_is_per_user() {
-        let mut book = TreeMap::new();
-
-        // Same user and same client id -> should be rejected on second add
-        let user1 = "alice".to_string();
-        let cid = "alpha".to_string();
-        let a1 = Order::new(10, user1.clone(), cid.clone(), Side::Bid, 100, 1);
-        book.add(a1).unwrap();
-
-        let a2 = Order::new(11, user1.clone(), cid.clone(), Side::Ask, 101, 2);
-        let err = book.add(a2).unwrap_err();
-        match err {
-            Error::OrderClientIdExists(got) => assert_eq!(got, cid),
-            other => panic!("expected OrderClientIdExists, got {:?}", other),
-        }
-
-        // Different user can reuse the same client id
-        let user2 = "bob".to_string();
-        let b1 = Order::new(12, user2.clone(), cid.clone(), Side::Bid, 99, 3);
-        // This should succeed because uniqueness is (user_id, client_id)
-        book.add(b1).unwrap();
     }
 }
