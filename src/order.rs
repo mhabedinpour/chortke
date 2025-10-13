@@ -32,7 +32,7 @@ pub type Price = u64; // ticks
 pub type Volume = u64;
 
 /// An order submitted by a client to buy or sell a quantity at a limit price.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, Clone)]
 pub struct Order {
     pub id: Id,
     pub user_id: user::Id,

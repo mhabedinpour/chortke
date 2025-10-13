@@ -266,6 +266,13 @@ impl HotBook for TreeMap {
 
         (trades, closed_orders)
     }
+
+    // Gets an order by its ID.
+    fn lookup(&self, id: Id) -> Option<&Order> {
+        let idx = self.order_indexes.get(&id)?;
+
+        Some(&self.orders[*idx].order)
+    }
 }
 
 #[cfg(test)]
@@ -956,5 +963,67 @@ mod tests {
             "expected no resting asks after partial fill, got: {:?}",
             d.asks
         );
+    }
+
+    #[test]
+    fn test_lookup_existing_returns_order() {
+        let mut book = TreeMap::new();
+        // Add two orders and verify lookup returns correct references
+        book.add(o(1, Side::Bid, 100, 5)).unwrap();
+        book.add(o(2, Side::Ask, 101, 7)).unwrap();
+
+        let o1 = book.lookup(1).expect("lookup should find id=1");
+        assert_eq!(o1.id, 1);
+        assert_eq!(o1.price, 100);
+        assert!(matches!(o1.side, Side::Bid));
+        assert_eq!(o1.remaining_volume(), 5);
+
+        let o2 = book.lookup(2).expect("lookup should find id=2");
+        assert_eq!(o2.id, 2);
+        assert_eq!(o2.price, 101);
+        assert!(matches!(o2.side, Side::Ask));
+        assert_eq!(o2.remaining_volume(), 7);
+    }
+
+    #[test]
+    fn test_lookup_not_found_returns_none() {
+        let mut book = TreeMap::new();
+        // Empty book -> None
+        assert!(book.lookup(42).is_none(), "empty book should return None");
+
+        // After adding different id
+        book.add(o(1, Side::Bid, 100, 5)).unwrap();
+        assert!(book.lookup(2).is_none(), "unknown id should return None");
+    }
+
+    #[test]
+    fn test_lookup_after_match_and_cancel() {
+        let mut book = TreeMap::new();
+        // Two orders that will partially fill one and fully close the other
+        book.add(o(10, Side::Bid, 100, 5)).unwrap(); // maker
+        book.add(o(11, Side::Ask, 99, 3)).unwrap(); // taker, will fully execute
+
+        let (_trades, closed) = book.match_orders();
+        // Ask 11 should be fully closed and no longer found
+        assert!(closed.iter().any(|c| c.id == 11));
+        assert!(
+            book.lookup(11).is_none(),
+            "fully executed order should be gone"
+        );
+
+        // Bid 10 should remain with 2 units left
+        let remaining = book
+            .lookup(10)
+            .expect("partially filled order should remain");
+        assert_eq!(
+            remaining.remaining_volume(),
+            2,
+            "remaining volume after partial fill should be 2"
+        );
+
+        // Cancel the remaining order and verify it disappears from lookup
+        let canceled = book.cancel(10).unwrap();
+        assert_eq!(canceled.id, 10);
+        assert!(book.lookup(10).is_none(), "canceled order should be gone");
     }
 }

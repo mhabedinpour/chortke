@@ -4,6 +4,7 @@
 //! implementation and the common types used to represent market depth.
 
 pub mod tree_map;
+pub mod warm_book;
 
 use crate::order::{ClientId, Id, Order, Price, Volume};
 use thiserror::Error;
@@ -56,4 +57,6 @@ pub trait HotBook {
     fn depth(&self, limit: usize) -> Depth;
     /// Matches orders until no more crossing prices remain, returning generated trades and closed orders.
     fn match_orders(&mut self) -> (Vec<crate::trade::Trade>, Vec<Order>);
+    // Gets an order by its ID.
+    fn lookup(&self, id: Id) -> Option<&Order>;
 }
