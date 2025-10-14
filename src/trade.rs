@@ -13,8 +13,6 @@ pub type Id = u64;
 /// A single execution between a bid and an ask.
 #[derive(Debug)]
 pub struct Trade {
-    /// Trade id. Typically assigned by the matching engine or persistence layer.
-    pub id: Id,
     /// The resting bid order involved in the trade (or taker if crossed).
     pub bid_order_id: order::Id,
     /// The resting ask order involved in the trade (or taker if crossed).

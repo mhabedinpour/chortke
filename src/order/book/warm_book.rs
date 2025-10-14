@@ -17,7 +17,31 @@
 use crate::order::book::{Depth, Error, HotBook};
 use crate::order::{ClientId, Id, Order};
 use crate::user;
+use std::cmp::{Ordering, Reverse};
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
+struct IndexedClosedOrders {
+    close_index: u64,
+    orders: Vec<Id>,
+}
+
+impl PartialEq for IndexedClosedOrders {
+    fn eq(&self, other: &Self) -> bool {
+        self.close_index == other.close_index
+    }
+}
+impl Eq for IndexedClosedOrders {}
+
+impl PartialOrd for IndexedClosedOrders {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for IndexedClosedOrders {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.close_index.cmp(&other.close_index)
+    }
+}
 
 /// A wrapper around a `HotBook` that tracks recently closed orders in memory
 /// for quick lookup by ID or by user/client ID pair.
@@ -32,6 +56,16 @@ pub struct WarmBook<T: HotBook> {
     /// In-memory store of recently closed orders (canceled or fully filled).
     /// These entries are intended to be short-lived.
     closed_orders: HashMap<Id, Order>,
+    /// A min-heap of batches of closed orders, grouped by the sequence/index at
+    /// which they were closed.
+    ///
+    /// Implemented as `BinaryHeap<Reverse<IndexedClosedOrders>>` so that the smallest
+    /// closing index is always at the top (min-heap behavior). Each heap node
+    /// contains the closure index and the list of order IDs that closed at
+    /// that index. This structure is consumed by `evict_closed_orders` to
+    /// efficiently remove all closed orders up to and including a given archived
+    /// index, after they have been persisted to durable storage.
+    closed_orders_by_index: BinaryHeap<Reverse<IndexedClosedOrders>>,
 }
 
 impl<T: HotBook> WarmBook<T> {
@@ -41,6 +75,7 @@ impl<T: HotBook> WarmBook<T> {
             hot_book,
             client_id_to_order_id: HashMap::new(),
             closed_orders: HashMap::new(),
+            closed_orders_by_index: BinaryHeap::new(),
         }
     }
 
@@ -68,10 +103,15 @@ impl<T: HotBook> WarmBook<T> {
     ///
     /// If successful, the canceled order is moved to the warm store of
     /// closed orders for subsequent lookups.
-    pub fn cancel(&mut self, id: Id) -> Result<Order, Error> {
-        match self.hot_book.cancel(id) {
+    pub fn cancel(&mut self, id: Id, log_index: u64) -> Result<Order, Error> {
+        match self.hot_book.cancel(id, log_index) {
             Ok(order) => {
                 self.closed_orders.insert(id, order.clone());
+                self.closed_orders_by_index
+                    .push(Reverse(IndexedClosedOrders {
+                        close_index: log_index,
+                        orders: vec![id],
+                    }));
                 Ok(order)
             }
             Err(e) => Err(e),
@@ -85,12 +125,13 @@ impl<T: HotBook> WarmBook<T> {
         &mut self,
         user_id: user::Id,
         client_id: ClientId,
+        log_index: u64,
     ) -> Result<Order, Error> {
         let id = self
             .client_id_to_order_id
             .get(&Order::format_user_client_id(&user_id, &client_id));
         match id {
-            Some(id) => self.cancel(*id),
+            Some(id) => self.cancel(*id, log_index),
             None => Err(Error::OrderClientIdNotFound(client_id)),
         }
     }
@@ -109,6 +150,21 @@ impl<T: HotBook> WarmBook<T> {
         let (trades, closed_orders) = self.hot_book.match_orders();
         self.closed_orders
             .extend(closed_orders.iter().map(|o| (o.id, o.clone())));
+
+        let mut grouped: HashMap<u64, Vec<Id>> = HashMap::new();
+        for order in closed_orders.iter() {
+            grouped
+                .entry(order.closed_by.unwrap())
+                .or_default()
+                .push(order.id);
+        }
+        for (index, ids) in grouped.into_iter() {
+            self.closed_orders_by_index
+                .push(Reverse(IndexedClosedOrders {
+                    close_index: index,
+                    orders: ids,
+                }));
+        }
 
         (trades, closed_orders)
     }
@@ -135,6 +191,40 @@ impl<T: HotBook> WarmBook<T> {
         match id {
             Some(id) => self.lookup(*id),
             None => None,
+        }
+    }
+    /// Evict closed orders that are safe to remove from the warm cache.
+    ///
+    /// This method is intended to be called after the caller has persisted
+    /// ("archived") all order closures up to and including `archived_index` to a
+    /// durable storage. It walks the internal min-heap of closed-order batches,
+    /// ordered by their closing index, and removes any batch whose index
+    /// is less than or equal to `archived_index`.
+    ///
+    /// For each evicted order id, the corresponding entry is removed from:
+    /// - `closed_orders` (the warm cache of closed orders), and
+    /// - `client_id_to_order_id` so that lookups by `(user_id, client_id)` no
+    ///   longer resolve to evicted, closed orders.
+    ///
+    /// If `archived_index` is lower than the smallest pending index, the call
+    /// is a no-op.
+    pub fn evict_closed_orders(&mut self, archived_index: u64) {
+        while let Some(Reverse(node)) = self.closed_orders_by_index.peek() {
+            if node.close_index > archived_index {
+                break;
+            }
+            let index = self.closed_orders_by_index.pop();
+
+            for order_id in index.unwrap().0.orders.iter() {
+                let order = self.closed_orders.remove(order_id);
+                if let Some(order) = order {
+                    self.client_id_to_order_id
+                        .remove(&Order::format_user_client_id(
+                            &order.user_id,
+                            &order.client_id,
+                        ));
+                }
+            }
         }
     }
 }
@@ -208,7 +298,7 @@ mod tests {
             "add should succeed before cancel"
         );
 
-        let canceled = book.cancel(1).expect("cancel by id should succeed");
+        let canceled = book.cancel(1, 0).expect("cancel by id should succeed");
         assert_eq!(
             canceled.id, 1,
             "canceled order id should match, got: {}",
@@ -234,7 +324,7 @@ mod tests {
     fn test_cancel_by_client_id_paths() {
         let mut book = wb();
         assert!(
-            matches!(book.cancel_by_client_id("uX".to_string(), "nope".to_string()), Err(Error::OrderClientIdNotFound(cid)) if cid=="nope"),
+            matches!(book.cancel_by_client_id("uX".to_string(), "nope".to_string(), 0), Err(Error::OrderClientIdNotFound(cid)) if cid=="nope"),
             "cancel_by_client_id should error when unknown; got different result"
         );
 
@@ -243,7 +333,7 @@ mod tests {
             "add should succeed"
         );
         let canceled = book
-            .cancel_by_client_id("u1".to_string(), "c1".to_string())
+            .cancel_by_client_id("u1".to_string(), "c1".to_string(), 0)
             .expect("cancel_by_client_id should succeed for existing mapping");
         assert_eq!(
             canceled.id, 1,
@@ -312,13 +402,173 @@ mod tests {
         );
 
         // Cancel to move into warm store and ensure lookup still works
-        let _ = book.cancel(1).expect("cancel should succeed");
+        let _ = book.cancel(1, 0).expect("cancel should succeed");
         let closed = book.lookup_by_client_id("u1".to_string(), "c1".to_string());
         assert!(
             closed.is_some(),
             "should find closed order by client id in warm store, got: {:?}",
             closed
         );
+    }
+
+    #[test]
+    fn test_evict_closed_orders_noop_when_below_min_index() {
+        let mut book = wb();
+        // Cancel two orders at index 5 and 7
+        assert!(book.add(o(1, "u1", "c1", Side::Bid, 100, 10)).is_ok());
+        assert!(book.add(o(2, "u2", "c2", Side::Ask, 101, 5)).is_ok());
+        let _ = book.cancel(1, 5).expect("cancel 1");
+        let _ = book.cancel(2, 7).expect("cancel 2");
+        // Both should be present
+        assert!(book.lookup(1).is_some());
+        assert!(book.lookup(2).is_some());
+        // Evict with archived_index lower than earliest (4)
+        book.evict_closed_orders(4);
+        // Nothing should be evicted
+        assert!(book.lookup(1).is_some());
+        assert!(book.lookup(2).is_some());
+        assert!(
+            book.lookup_by_client_id("u1".to_string(), "c1".to_string())
+                .is_some()
+        );
+        assert!(
+            book.lookup_by_client_id("u2".to_string(), "c2".to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_evict_closed_orders_partial_then_full() {
+        let mut book = wb();
+        assert!(book.add(o(1, "u1", "c1", Side::Bid, 100, 10)).is_ok());
+        assert!(book.add(o(2, "u2", "c2", Side::Ask, 101, 5)).is_ok());
+        assert!(book.add(o(3, "u3", "c3", Side::Bid, 99, 3)).is_ok());
+        // Close at index 5, 7, 9 respectively
+        let _ = book.cancel(1, 5).expect("cancel 1");
+        let _ = book.cancel(2, 7).expect("cancel 2");
+        let _ = book.cancel(3, 9).expect("cancel 3");
+        // Sanity
+        for id in [1u64, 2, 3] {
+            assert!(book.lookup(id).is_some(), "id {} should be cached", id);
+        }
+        // Evict up to 6 -> removes only id 1
+        book.evict_closed_orders(6);
+        assert!(book.lookup(1).is_none(), "id 1 should be evicted");
+        assert!(
+            book.lookup_by_client_id("u1".to_string(), "c1".to_string())
+                .is_none(),
+            "client map for id1 should be gone"
+        );
+        assert!(book.lookup(2).is_some(), "id 2 should remain");
+        assert!(book.lookup(3).is_some(), "id 3 should remain");
+        // Evict up to 9 -> removes remaining
+        book.evict_closed_orders(9);
+        assert!(book.lookup(2).is_none(), "id 2 should be evicted");
+        assert!(book.lookup(3).is_none(), "id 3 should be evicted");
+        assert!(
+            book.lookup_by_client_id("u2".to_string(), "c2".to_string())
+                .is_none()
+        );
+        assert!(
+            book.lookup_by_client_id("u3".to_string(), "c3".to_string())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_match_closed_then_evict_by_index_from_matching() {
+        let mut book = wb();
+        // Add two orders that will cross fully: maker ask and taker bid
+        assert!(book.add(o(1, "u1", "a1", Side::Ask, 100, 5)).is_ok());
+        assert!(book.add(o(2, "u2", "b1", Side::Bid, 105, 5)).is_ok());
+        // Match them; both should close and be cached in warm store
+        let (_trades, closed) = book.match_orders();
+        assert_eq!(closed.len(), 2, "both orders should close in this scenario");
+        // Verify available in warm cache
+        assert!(book.lookup(1).is_some());
+        assert!(book.lookup(2).is_some());
+        assert!(
+            book.lookup_by_client_id("u1".to_string(), "a1".to_string())
+                .is_some()
+        );
+        assert!(
+            book.lookup_by_client_id("u2".to_string(), "b1".to_string())
+                .is_some()
+        );
+        // Evict up to that index
+        book.evict_closed_orders(2);
+        // Both should be gone now (they share the same index in this simple full-cross)
+        assert!(book.lookup(1).is_none());
+        assert!(book.lookup(2).is_none());
+        assert!(
+            book.lookup_by_client_id("u1".to_string(), "a1".to_string())
+                .is_none()
+        );
+        assert!(
+            book.lookup_by_client_id("u2".to_string(), "b1".to_string())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_match_multiple_groups_then_partial_evict() {
+        let mut book = wb();
+        // First crossing pair
+        assert!(book.add(o(1, "u1", "a1", Side::Ask, 100, 4)).is_ok());
+        assert!(book.add(o(2, "u2", "b1", Side::Bid, 100, 4)).is_ok());
+        // Second crossing pair; use different ids to ensure different closed_by values
+        assert!(book.add(o(10, "u10", "a10", Side::Ask, 99, 3)).is_ok());
+        assert!(book.add(o(20, "u20", "b20", Side::Bid, 101, 3)).is_ok());
+        let (_trades1, closed1) = book.match_orders();
+        // closed1 should contain 4 orders (two pairs) but their closed_by may differ per pair
+        assert_eq!(closed1.len(), 4, "two pairs should fully close");
+        // Collect index per pair
+        let mut indexes: Vec<u64> = closed1.iter().map(|o| o.closed_by.unwrap()).collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        assert!(
+            indexes.len() >= 2,
+            "expect at least two distinct indexes from two groups"
+        );
+        let first_index = indexes[0];
+        let second_index = indexes[1];
+        // After matching, all should be present
+        for (id, u, c) in [
+            (1u64, "u1", "a1"),
+            (2, "u2", "b1"),
+            (10, "u10", "a10"),
+            (20, "u20", "b20"),
+        ] {
+            assert!(book.lookup(id).is_some(), "id {} should be cached", id);
+            assert!(
+                book.lookup_by_client_id(u.to_string(), c.to_string())
+                    .is_some()
+            );
+        }
+        // Evict only the first index -> only one group should be removed
+        book.evict_closed_orders(first_index);
+        let remaining = [1u64, 2, 10, 20]
+            .iter()
+            .filter(|&&id| book.lookup(id).is_some())
+            .count();
+        assert_eq!(
+            remaining, 2,
+            "after partial eviction, exactly two should remain"
+        );
+        // Evict the second index -> clear the rest
+        book.evict_closed_orders(second_index);
+        for (id, u, c) in [
+            (1u64, "u1", "a1"),
+            (2, "u2", "b1"),
+            (10, "u10", "a10"),
+            (20, "u20", "b20"),
+        ] {
+            assert!(book.lookup(id).is_none(), "id {} should be evicted", id);
+            assert!(
+                book.lookup_by_client_id(u.to_string(), c.to_string())
+                    .is_none()
+            );
+        }
     }
 
     #[test]

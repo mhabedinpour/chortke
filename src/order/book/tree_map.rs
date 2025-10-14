@@ -120,7 +120,12 @@ impl TreeMap {
     /// Reduce (and possibly remove) orders from the given price level by a
     /// target `volume`, walking from the head to preserve FIFO. Panics if
     /// `volume` exceeds the level's total available volume.
-    fn remove_by_volume(&mut self, level: &mut PriceLevel, volume: Volume) -> Vec<Order> {
+    fn remove_by_volume(
+        &mut self,
+        level: &mut PriceLevel,
+        volume: Volume,
+        closer_index: u64,
+    ) -> Vec<Order> {
         assert!(volume <= level.total_volume);
 
         let mut remaining_volume = volume;
@@ -135,6 +140,7 @@ impl TreeMap {
                 let mut closed_order = self.remove_order_from_level(idx);
                 closed_order.executed_volume = closed_order.volume;
                 closed_order.status = Status::Executed;
+                closed_order.closed_by = Some(closer_index);
                 closed_orders.push(closed_order);
                 continue;
             }
@@ -172,7 +178,7 @@ impl HotBook for TreeMap {
     }
 
     /// Cancel an existing order by id.
-    fn cancel(&mut self, id: Id) -> Result<Order, Error> {
+    fn cancel(&mut self, id: Id, log_index: u64) -> Result<Order, Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
             return Err(Error::OrderIdNotFound(id));
@@ -180,6 +186,7 @@ impl HotBook for TreeMap {
 
         let mut order = self.remove_order_from_level(*idx.unwrap());
         order.status = Status::Canceled;
+        order.closed_by = Some(log_index);
         Ok(order)
     }
 
@@ -250,7 +257,6 @@ impl HotBook for TreeMap {
                         (self.orders[ask_idx].order.price, false)
                     };
                 trades.push(Trade {
-                    id: 0,
                     bid_order_id: self.orders[bid_idx].order.id,
                     ask_order_id: self.orders[ask_idx].order.id,
                     is_bid_maker,
@@ -258,8 +264,19 @@ impl HotBook for TreeMap {
                     volume: trade_volume,
                     timestamp: OffsetDateTime::now_utc(),
                 });
-                closed_orders.append(self.remove_by_volume(top_bid_level, trade_volume).as_mut());
-                closed_orders.append(self.remove_by_volume(top_ask_level, trade_volume).as_mut());
+                let closer_index = if is_bid_maker {
+                    self.orders[bid_idx].order.id
+                } else {
+                    self.orders[ask_idx].order.id
+                };
+                closed_orders.append(
+                    self.remove_by_volume(top_bid_level, trade_volume, closer_index)
+                        .as_mut(),
+                );
+                closed_orders.append(
+                    self.remove_by_volume(top_ask_level, trade_volume, closer_index)
+                        .as_mut(),
+                );
                 volume -= trade_volume;
             }
         }
@@ -366,7 +383,7 @@ mod tests {
         }
 
         // Cancel unknown id should fail
-        let err = book.cancel(999).unwrap_err();
+        let err = book.cancel(999, 0).unwrap_err();
         match err {
             Error::OrderIdNotFound(_) => {}
             _ => panic!("expected Error::OrderNotFound for unknown id, got different error"),
@@ -498,6 +515,19 @@ mod tests {
         );
         assert_eq!(closed[0].remaining_volume(), 0);
         assert_eq!(closed[1].remaining_volume(), 0);
+        // closed_by should be set to maker's id (bid id=1)
+        assert_eq!(
+            closed[0].closed_by,
+            Some(1),
+            "closed_by for bid should be maker=1, got {:?}",
+            closed[0].closed_by
+        );
+        assert_eq!(
+            closed[1].closed_by,
+            Some(1),
+            "closed_by for ask should be maker=1, got {:?}",
+            closed[1].closed_by
+        );
 
         // Book should be empty after full cross
         let d = book.depth(10);
@@ -740,7 +770,7 @@ mod tests {
             "expected exactly one bid level before cancel, got: {:?}",
             d.bids
         );
-        book.cancel(1).unwrap();
+        book.cancel(1, 0).unwrap();
         let d2 = book.depth(10);
         assert!(
             d2.bids.is_empty(),
@@ -760,7 +790,7 @@ mod tests {
         // Two bids at the same price. Cancel the head, leaving the second as maker.
         book.add(o(1, Side::Bid, 100, 2)).unwrap();
         book.add(o(2, Side::Bid, 100, 3)).unwrap();
-        book.cancel(1).unwrap();
+        book.cancel(1, 0).unwrap();
         // Now cross with an ask that takes 2. It should trade against id=2.
         book.add(o(3, Side::Ask, 99, 2)).unwrap();
         let (trades, closed) = book.match_orders();
@@ -1022,7 +1052,7 @@ mod tests {
         );
 
         // Cancel the remaining order and verify it disappears from lookup
-        let canceled = book.cancel(10).unwrap();
+        let canceled = book.cancel(10, 0).unwrap();
         assert_eq!(canceled.id, 10);
         assert!(book.lookup(10).is_none(), "canceled order should be gone");
     }

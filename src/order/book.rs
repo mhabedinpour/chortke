@@ -52,7 +52,7 @@ pub trait HotBook {
     /// Add a new order to the book. Returns an error if the ID already exists.
     fn add(&mut self, order: Order) -> Result<(), Error>;
     /// Cancel an existing order by its ID.
-    fn cancel(&mut self, id: Id) -> Result<Order, Error>;
+    fn cancel(&mut self, id: Id, log_index: u64) -> Result<Order, Error>;
     /// Returns a depth snapshot for the requested number of price levels per side.
     fn depth(&self, limit: usize) -> Depth;
     /// Matches orders until no more crossing prices remain, returning generated trades and closed orders.

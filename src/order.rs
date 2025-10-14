@@ -23,6 +23,7 @@ pub enum Status {
 }
 
 /// Unique order identifier.
+/// This is the raft log index in which order was added.
 pub type Id = u64;
 /// Arbitrary client-provided identifier.
 pub type ClientId = String;
@@ -47,6 +48,8 @@ pub struct Order {
     /// Cumulative executed volume so far.
     pub executed_volume: Volume,
     pub status: Status,
+    // in which raft log index order was closed
+    pub closed_by: Option<u64>,
 }
 
 impl Order {
@@ -69,6 +72,7 @@ impl Order {
             volume,
             executed_volume: 0,
             status: Status::Open,
+            closed_by: None,
         }
     }
 
