@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 
 /// The side of the order: Bid to buy, Ask to sell.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
+#[repr(u8)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Bid,
@@ -93,3 +94,4 @@ impl Order {
 
 /// Order book interfaces and implementations.
 pub mod book;
+pub mod wire;

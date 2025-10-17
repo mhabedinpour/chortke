@@ -6,10 +6,10 @@
 //! allocations and allowing O(1) insertion/removal within a level. Matching is
 //! performed by crossing the best bid and best ask while prices overlap.
 
+use crate::collections::slab::SnapshotableSlab;
 use crate::order::book::{Depth, DepthItem, Error, HotBook};
 use crate::order::{Id, Order, Price, Side, Status, Volume};
 use crate::trade::Trade;
-use slab::Slab;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use time::OffsetDateTime;
@@ -29,7 +29,7 @@ struct PriceLevel {
 impl PriceLevel {
     /// Append an order node to the back of the level's FIFO queue and update
     /// aggregates. The `order_idx` must reference a valid entry in `orders`.
-    fn push(&mut self, orders: &mut Slab<OrderNode>, order_idx: usize) {
+    fn push(&mut self, orders: &mut SnapshotableSlab<OrderNode>, order_idx: usize) {
         match self.tail {
             Some(tail) => {
                 orders[tail].next = Some(order_idx);
@@ -49,7 +49,7 @@ impl PriceLevel {
 
     /// Remove a specific order node from the level's queue and update
     /// aggregates. The node must be currently linked in this level.
-    fn remove(&mut self, orders: &mut Slab<OrderNode>, order_idx: usize) {
+    fn remove(&mut self, orders: &mut SnapshotableSlab<OrderNode>, order_idx: usize) {
         let prev = orders[order_idx].prev;
         let next = orders[order_idx].next;
 
@@ -72,7 +72,7 @@ impl PriceLevel {
 
 /// Node representing an individual order stored in a slab and linked within a
 /// price level's FIFO queue.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OrderNode {
     order: Order,
     next: Option<usize>,
@@ -84,7 +84,7 @@ struct OrderNode {
 pub struct TreeMap {
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,
-    orders: Slab<OrderNode>,
+    orders: SnapshotableSlab<OrderNode>,
     order_indexes: HashMap<Id, usize>,
 }
 
