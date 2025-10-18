@@ -94,4 +94,5 @@ impl Order {
 
 /// Order book interfaces and implementations.
 pub mod book;
+pub mod snapshot;
 pub mod wire;

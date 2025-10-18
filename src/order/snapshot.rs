@@ -1,0 +1,391 @@
+//! Snapshot file I/O for orders.
+//!
+//! This module provides a compact, forward‑compatible on‑disk format to persist and
+//! restore orders in batches. It is intended for periodic snapshots of the order state,
+//! not for an append‑only event log.
+//!
+//! File format (little‑endian):
+//! - 8‑byte ASCII magic: `ORDERSNP`
+//! - u16 global snapshot version (currently 1)
+//! - Repeating sequence of batches, each encoded as:
+//!   - u32 payload length N
+//!   - N bytes payload, encoded with [`crate::order::wire`]
+//!
+//! Versioning and compatibility:
+//! - Readers validate the magic and the global version and will refuse to open a file with
+//!   an unsupported version. If a future incompatible change is introduced, bump the
+//!   global version.
+//! - The batch payload is delegated to the `order::wire` codec, which may carry its own
+//!   versioning. This module treats the batch bytes as opaque and only length‑prefixes
+//!   them.
+//!
+//! Batching semantics:
+//! - Orders are written and read in batches. Each call to [`SnapshotWriter::write_batch`]
+//!   produces a single batch in the file. [`SnapshotReader::next_batch`] returns exactly
+//!   those batches. When no more data is available, it returns `Ok(None)` (EOF).
+//!
+//! Durability:
+//! - Calling [`SnapshotWriter::finish`] flushes buffers and calls `sync_all()` on the file
+//!   to ensure data is durably persisted on supported platforms.
+//!
+use crate::order::wire;
+use std::{io, path::Path};
+use thiserror::Error;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+
+#[derive(Error, Debug)]
+/// Errors that can occur while reading or writing snapshot files.
+pub enum Error {
+    /// Wrapped `std::io::Error` arising from filesystem operations.
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    /// The batch payload failed to encode/decode via the `order::wire` codec.
+    #[error("Codec error: {0}")]
+    Codec(#[from] wire::Error),
+
+    /// The file does not start with the expected `ORDERSNP` magic bytes.
+    #[error("Invalid file magic")]
+    BadMagic,
+
+    /// The snapshot's global version is not recognized by this reader implementation.
+    #[error("Unsupported global snapshot version: {0}")]
+    UnsupportedGlobalVersion(u16),
+
+    /// A batch length was read but the expected number of bytes could not be read
+    /// (likely due to an unexpected EOF), implying a truncated or corrupt file.
+    #[error("Truncated or corrupt snapshot file")]
+    Truncated,
+
+    /// The encoded batch would exceed `u32::MAX` bytes and cannot be written.
+    #[error("Snapshot file is too large")]
+    TooLarge,
+}
+
+const MAGIC: &[u8; 8] = b"ORDERSNP"; // 8-byte magic at the very start
+const SUPPORTED_GLOBAL_VERSION: u16 = 1;
+
+async fn write_header(f: &mut File, global_version: u16) -> Result<(), Error> {
+    f.write_all(MAGIC).await?;
+    f.write_all(&global_version.to_le_bytes()).await?;
+    Ok(())
+}
+
+async fn read_header(r: &mut File) -> Result<u16, Error> {
+    let mut magic = [0u8; 8];
+    let mut ver = [0u8; 2];
+    r.read_exact(&mut magic).await?;
+    if &magic != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    r.read_exact(&mut ver).await?;
+    let version = u16::from_le_bytes(ver);
+    if version != SUPPORTED_GLOBAL_VERSION {
+        return Err(Error::UnsupportedGlobalVersion(version));
+    }
+    Ok(version)
+}
+
+async fn write_len_prefixed(w: &mut BufWriter<File>, bytes: &[u8]) -> Result<(), Error> {
+    let len = u32::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
+    w.write_all(&len.to_le_bytes()).await?;
+    w.write_all(bytes).await?;
+    Ok(())
+}
+
+async fn read_len_prefixed(r: &mut BufReader<File>) -> Result<Option<Vec<u8>>, Error> {
+    let mut len_buf = [0u8; 4];
+
+    // Try to read the length. Hitting EOF here means no more batches left.
+    match r.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(Error::Io(e)),
+    }
+
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await.map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Error::Truncated
+        } else {
+            Error::Io(e)
+        }
+    })?;
+    Ok(Some(buf))
+}
+
+/// Builder to create a [`SnapshotWriter`] for writing a new snapshot file.
+///
+/// The builder only carries the target path. Use [`open`](SnapshotWriterBuilder::open)
+/// to create and initialize the file (writing the header) and get a writer.
+pub struct SnapshotWriterBuilder<'p> {
+    path: &'p Path,
+}
+
+impl<'p> SnapshotWriterBuilder<'p> {
+    /// Create a new builder targeting the provided filesystem path.
+    pub fn new(path: &'p Path) -> Self {
+        Self { path }
+    }
+
+    /// Create the file, write the header, and return a ready [`SnapshotWriter`].
+    ///
+    /// This will truncate the file if it already exists.
+    pub async fn open(self) -> Result<SnapshotWriter, Error> {
+        let mut file = File::create(self.path).await?;
+        write_header(&mut file, SUPPORTED_GLOBAL_VERSION).await?;
+        let writer = BufWriter::with_capacity(1 << 20, file); // 1 MiB buffer
+        Ok(SnapshotWriter { writer })
+    }
+}
+
+/// Asynchronously writes batches of orders into a snapshot file.
+///
+/// A writer is created via [`SnapshotWriterBuilder`]. Each call to
+/// [`write_batch`](SnapshotWriter::write_batch) appends one encoded batch to the file.
+/// Call [`finish`](SnapshotWriter::finish) to flush buffers and fsync the file.
+pub struct SnapshotWriter {
+    writer: BufWriter<File>,
+}
+
+impl SnapshotWriter {
+    /// Encode and append a batch of orders to the snapshot file.
+    ///
+    /// Errors:
+    /// - Returns [`Error::Codec`] if encoding the batch fails.
+    /// - Returns [`Error::TooLarge`] if the encoded batch exceeds `u32::MAX` bytes.
+    /// - Returns [`Error::Io`] if writing to the file fails.
+    pub async fn write_batch(&mut self, orders: &[super::Order]) -> Result<(), Error> {
+        let encoded = wire::encode_orders_batch(orders)?;
+        write_len_prefixed(&mut self.writer, &encoded).await?;
+        Ok(())
+    }
+
+    /// Flush internal buffers and call `sync_all()` on the underlying file to
+    /// provide durability guarantees on supported platforms.
+    ///
+    /// After calling this method the writer is consumed and cannot be used again.
+    pub async fn finish(mut self) -> Result<(), Error> {
+        self.writer.flush().await?;
+        let f = self.writer.into_inner();
+        f.sync_all().await?;
+        Ok(())
+    }
+}
+
+/// Reads snapshot files and yields batches of orders.
+///
+/// Create a reader with [`SnapshotReader::open`], then call
+/// [`next_batch`](SnapshotReader::next_batch) in a loop until it returns `Ok(None)`.
+/// You can inspect the snapshot global version via [`global_version`](SnapshotReader::global_version).
+pub struct SnapshotReader {
+    reader: BufReader<File>,
+    global_version: u16,
+}
+
+impl SnapshotReader {
+    /// Open an existing snapshot file and validate its header.
+    ///
+    /// Errors:
+    /// - [`Error::BadMagic`] if the file does not start with the expected magic bytes.
+    /// - [`Error::UnsupportedGlobalVersion`] if the version is not supported.
+    /// - [`Error::Io`] for underlying filesystem errors.
+    pub async fn open(path: &Path) -> Result<Self, Error> {
+        let mut file = File::open(path).await?;
+        let version = read_header(&mut file).await?;
+        let reader = BufReader::with_capacity(1 << 20, file);
+        Ok(Self {
+            reader,
+            global_version: version,
+        })
+    }
+
+    /// Return the validated global snapshot version read from the file header.
+    pub fn global_version(&self) -> u16 {
+        self.global_version
+    }
+
+    /// Read and decode the next batch of orders.
+    ///
+    /// Returns `Ok(None)` on EOF (no more batches). Returns an error if the
+    /// batch cannot be read or decoded.
+    pub async fn next_batch(&mut self) -> Result<Option<Vec<super::Order>>, Error> {
+        let Some(bytes) = read_len_prefixed(&mut self.reader).await? else {
+            return Ok(None);
+        };
+        let orders = wire::decode_orders_batch(&bytes)?;
+        Ok(Some(orders))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::order::{self, snapshot::Error as SnapErr};
+    use crate::user;
+    use std::path::PathBuf;
+    use tokio::io::AsyncWriteExt;
+    use uuid::Uuid;
+
+    fn temp_path() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("snapshot_test_{}.bin", Uuid::new_v4()));
+        p
+    }
+
+    fn mk_order(id: u64) -> order::Order {
+        let user_id: user::Id = "user-1".to_string();
+        let client_id = format!("c{}", id);
+        let side = order::Side::Bid;
+        let price: order::Price = 1000 + id;
+        let volume: order::Volume = 10 + id;
+        order::Order::new(id, user_id, client_id, side, price, volume)
+    }
+
+    #[tokio::test]
+    async fn write_read_roundtrip_multiple_batches() {
+        let path = temp_path();
+
+        // Write two batches
+        let mut w = SnapshotWriterBuilder::new(&path)
+            .open()
+            .await
+            .expect("failed to open writer");
+        let o1 = mk_order(1);
+        let o2 = mk_order(2);
+        w.write_batch(&[o1.clone()])
+            .await
+            .expect("write_batch 1 failed");
+        w.write_batch(&[o2.clone()])
+            .await
+            .expect("write_batch 2 failed");
+        w.finish().await.expect("finish writer failed");
+
+        // Read back batches
+        let mut r = SnapshotReader::open(&path)
+            .await
+            .expect("open reader failed");
+        assert_eq!(
+            r.global_version(),
+            super::SUPPORTED_GLOBAL_VERSION,
+            "unexpected global version in snapshot"
+        );
+
+        let b1 = r
+            .next_batch()
+            .await
+            .expect("reading batch 1 errored")
+            .expect("batch 1 missing");
+        assert_eq!(b1.len(), 1, "batch 1 length mismatch: got {}", b1.len());
+        assert_eq!(
+            b1[0].id, 1,
+            "batch 1 first order id mismatch: got {}",
+            b1[0].id
+        );
+        assert_eq!(b1[0].client_id, o1.client_id, "batch 1 client_id mismatch");
+
+        let b2 = r
+            .next_batch()
+            .await
+            .expect("reading batch 2 errored")
+            .expect("batch 2 missing");
+        assert_eq!(b2.len(), 1, "batch 2 length mismatch: got {}", b2.len());
+        assert_eq!(
+            b2[0].id, 2,
+            "batch 2 first order id mismatch: got {}",
+            b2[0].id
+        );
+        assert_eq!(
+            b2[0].price, o2.price,
+            "batch 2 price mismatch: got {}",
+            b2[0].price
+        );
+
+        let end = r.next_batch().await.expect("reading end errored");
+        assert!(end.is_none(), "expected EOF None, got: {:?}", end);
+
+        // cleanup
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn open_fails_on_bad_magic() {
+        let path = temp_path();
+        // Craft a file with wrong magic
+        let mut f = File::create(&path).await.expect("create file failed");
+        f.write_all(b"BADSIG!!").await.expect("write magic failed");
+        f.write_all(&1u16.to_le_bytes())
+            .await
+            .expect("write version failed");
+        f.flush().await.expect("flush failed");
+
+        let err = match SnapshotReader::open(&path).await {
+            Ok(_) => panic!("expected BadMagic error, but open succeeded"),
+            Err(e) => e,
+        };
+        match err {
+            SnapErr::BadMagic => {}
+            other => panic!("expected BadMagic, got: {other:?}"),
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn open_fails_on_unsupported_version() {
+        let path = temp_path();
+        let mut f = File::create(&path).await.expect("create file failed");
+        f.write_all(super::MAGIC).await.expect("write magic failed");
+        let bad_ver: u16 = super::SUPPORTED_GLOBAL_VERSION + 1;
+        f.write_all(&bad_ver.to_le_bytes())
+            .await
+            .expect("write version failed");
+        f.flush().await.expect("flush failed");
+
+        let err = match SnapshotReader::open(&path).await {
+            Ok(_) => panic!("expected UnsupportedGlobalVersion error, but open succeeded"),
+            Err(e) => e,
+        };
+        match err {
+            SnapErr::UnsupportedGlobalVersion(v) => assert_eq!(
+                v, bad_ver,
+                "unsupported version mismatch: got {} expected {}",
+                v, bad_ver
+            ),
+            other => panic!("expected UnsupportedGlobalVersion, got: {other:?}"),
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn next_batch_fails_on_truncated_payload() {
+        let path = temp_path();
+        // write header and a fake batch len, but no data
+        let mut f = File::create(&path).await.expect("create file failed");
+        // proper header
+        f.write_all(super::MAGIC).await.expect("write magic failed");
+        f.write_all(&super::SUPPORTED_GLOBAL_VERSION.to_le_bytes())
+            .await
+            .expect("write version failed");
+        // one batch of length 10 but do not write the payload
+        let len: u32 = 10;
+        f.write_all(&len.to_le_bytes())
+            .await
+            .expect("write length failed");
+        f.flush().await.expect("flush failed");
+
+        let mut r = SnapshotReader::open(&path)
+            .await
+            .expect("open reader failed");
+        let err = r
+            .next_batch()
+            .await
+            .expect_err("expected Truncated error when reading batch");
+        match err {
+            SnapErr::Truncated => {}
+            other => panic!("expected Truncated, got: {other:?}"),
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+}
