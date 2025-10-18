@@ -131,9 +131,20 @@ impl From<OrderV1> for Order {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OrderBatch<T> {
+struct OrderBatch {
     version: u16,
-    orders: Vec<T>,
+    checksum: u64,
+    orders: Vec<u8>,
+}
+
+impl OrderBatch {
+    fn calc_checksum(encoded_orders: &[u8]) -> u64 {
+        use blake3::Hasher;
+        let mut hasher = Hasher::new();
+        hasher.update(encoded_orders);
+        let hash = hasher.finalize();
+        u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
+    }
 }
 
 /// Errors returned by encoding/decoding operations.
@@ -145,6 +156,8 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("Unsupported schema version: {0}")]
     UnsupportedVersion(u16),
+    #[error("Checksum mismatch")]
+    ChecksumMismatch,
 }
 
 /// Encode a batch of orders into a compressed binary payload.
@@ -152,9 +165,12 @@ pub enum Error {
 /// The output is zstd-compressed bincode bytes of Vec<OrderV1>.
 pub fn encode_orders_batch(orders: &[Order]) -> Result<Vec<u8>, Error> {
     let opts = bincode::DefaultOptions::new().with_fixint_encoding();
+    let orders = orders.iter().map(OrderV1::from).collect::<Vec<OrderV1>>();
+    let encoded_orders = opts.serialize(&orders)?;
     let payload = opts.serialize(&OrderBatch {
         version: 1,
-        orders: orders.iter().map(OrderV1::from).collect::<Vec<OrderV1>>(),
+        checksum: OrderBatch::calc_checksum(&encoded_orders),
+        orders: encoded_orders,
     })?;
     Ok(zstd::stream::encode_all(&payload[..], 3)?)
 }
@@ -170,8 +186,12 @@ pub fn decode_orders_batch(bytes: &[u8]) -> Result<Vec<Order>, Error> {
 
     match version {
         1 => {
-            let batch: OrderBatch<OrderV1> = opts.deserialize_from(&mut rdr)?;
-            Ok(batch.orders.into_iter().map(Order::from).collect())
+            let batch: OrderBatch = opts.deserialize_from(&mut rdr)?;
+            let orders: Vec<OrderV1> = opts.deserialize_from(batch.orders.as_slice())?;
+            if batch.checksum != OrderBatch::calc_checksum(&batch.orders) {
+                return Err(Error::ChecksumMismatch);
+            }
+            Ok(orders.into_iter().map(Order::from).collect())
         }
         other => Err(Error::UnsupportedVersion(other)),
     }
