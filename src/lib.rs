@@ -7,3 +7,5 @@ pub mod trade;
 
 pub mod collections;
 pub mod user;
+
+pub mod seq;

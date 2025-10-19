@@ -1,4 +1,4 @@
-use crate::user;
+use crate::{seq, user};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -24,8 +24,8 @@ pub enum Status {
 }
 
 /// Unique order identifier.
-/// This is the raft log index in which order was added.
-pub type Id = u64;
+/// This is the sequence in which the order was added.
+pub type Id = seq::Seq;
 /// Arbitrary client-provided identifier.
 pub type ClientId = String;
 /// Price in integer ticks (no decimals at this layer).
@@ -49,8 +49,8 @@ pub struct Order {
     /// Cumulative executed volume so far.
     pub executed_volume: Volume,
     pub status: Status,
-    // in which raft log index order was closed
-    pub closed_by: Option<u64>,
+    // in which sequence this order was closed, if any
+    pub closed_by: Option<seq::Seq>,
 }
 
 impl Order {

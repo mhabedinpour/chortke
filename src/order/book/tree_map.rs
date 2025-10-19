@@ -9,6 +9,7 @@
 use crate::collections::slab::SnapshotableSlab;
 use crate::order::book::{Depth, DepthItem, Error, HotBook};
 use crate::order::{Id, Order, Price, Side, Status, Volume};
+use crate::seq;
 use crate::trade::Trade;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
@@ -124,7 +125,7 @@ impl TreeMap {
         &mut self,
         level: &mut PriceLevel,
         volume: Volume,
-        closer_index: u64,
+        closer_seq: seq::Seq,
     ) -> Vec<Order> {
         assert!(volume <= level.total_volume);
 
@@ -140,7 +141,7 @@ impl TreeMap {
                 let mut closed_order = self.remove_order_from_level(idx);
                 closed_order.executed_volume = closed_order.volume;
                 closed_order.status = Status::Executed;
-                closed_order.closed_by = Some(closer_index);
+                closed_order.closed_by = Some(closer_seq);
                 closed_orders.push(closed_order);
                 continue;
             }
@@ -178,7 +179,7 @@ impl HotBook for TreeMap {
     }
 
     /// Cancel an existing order by id.
-    fn cancel(&mut self, id: Id, log_index: u64) -> Result<Order, Error> {
+    fn cancel(&mut self, id: Id, seq: seq::Seq) -> Result<Order, Error> {
         let idx = self.order_indexes.get(&id);
         if idx.is_none() {
             return Err(Error::OrderIdNotFound(id));
@@ -186,7 +187,7 @@ impl HotBook for TreeMap {
 
         let mut order = self.remove_order_from_level(*idx.unwrap());
         order.status = Status::Canceled;
-        order.closed_by = Some(log_index);
+        order.closed_by = Some(seq);
         Ok(order)
     }
 

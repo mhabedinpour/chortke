@@ -7,9 +7,6 @@
 use crate::order;
 use time::OffsetDateTime;
 
-/// Unique identifier for trades.
-pub type Id = u64;
-
 /// A single execution between a bid and an ask.
 #[derive(Debug)]
 pub struct Trade {
