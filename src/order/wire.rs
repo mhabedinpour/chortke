@@ -16,7 +16,7 @@
 //! in the future when new fields are added.
 
 use super::{ClientId, Id, Order, Price, Volume};
-use crate::user;
+use crate::{market, user};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -133,6 +133,7 @@ impl From<OrderV1> for Order {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OrderBatch {
     version: u16,
+    symbol: market::Symbol,
     checksum: u64,
     orders: Vec<u8>,
 }
@@ -163,12 +164,13 @@ pub enum Error {
 /// Encode a batch of orders into a compressed binary payload.
 ///
 /// The output is zstd-compressed bincode bytes of Vec<OrderV1>.
-pub fn encode_orders_batch(orders: &[Order]) -> Result<Vec<u8>, Error> {
+pub fn encode_orders_batch(symbol: market::Symbol, orders: &[Order]) -> Result<Vec<u8>, Error> {
     let opts = bincode::DefaultOptions::new().with_fixint_encoding();
     let orders = orders.iter().map(OrderV1::from).collect::<Vec<OrderV1>>();
     let encoded_orders = opts.serialize(&orders)?;
     let payload = opts.serialize(&OrderBatch {
         version: 1,
+        symbol,
         checksum: OrderBatch::calc_checksum(&encoded_orders),
         orders: encoded_orders,
     })?;
@@ -177,7 +179,7 @@ pub fn encode_orders_batch(orders: &[Order]) -> Result<Vec<u8>, Error> {
 
 /// Decode a batch of orders from a compressed binary payload produced by
 /// encode_orders_batch.
-pub fn decode_orders_batch(bytes: &[u8]) -> Result<Vec<Order>, Error> {
+pub fn decode_orders_batch(bytes: &[u8]) -> Result<(market::Symbol, Vec<Order>), Error> {
     let dec = zstd::stream::decode_all(bytes)?;
     let opts = bincode::DefaultOptions::new().with_fixint_encoding();
     let mut rdr = Cursor::new(&dec);
@@ -191,7 +193,7 @@ pub fn decode_orders_batch(bytes: &[u8]) -> Result<Vec<Order>, Error> {
             if batch.checksum != OrderBatch::calc_checksum(&batch.orders) {
                 return Err(Error::ChecksumMismatch);
             }
-            Ok(orders.into_iter().map(Order::from).collect())
+            Ok((batch.symbol, orders.into_iter().map(Order::from).collect()))
         }
         other => Err(Error::UnsupportedVersion(other)),
     }
@@ -249,8 +251,13 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_single() {
         let order = sample_order(7);
-        let bytes = encode_orders_batch(&[order.clone()]).expect("encode");
-        let decoded = decode_orders_batch(&bytes).expect("decode");
+        let bytes = encode_orders_batch(String::from("BTCUSDT"), &[order.clone()]).expect("encode");
+        let (symbol, decoded) = decode_orders_batch(&bytes).expect("decode");
+        assert_eq!(
+            symbol, "BTCUSDT",
+            "symbol mismatch: got {:?}, expected BTCUSDT",
+            symbol
+        );
         assert_eq!(
             decoded.len(),
             1,
@@ -312,8 +319,8 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_multiple() {
         let orders: Vec<Order> = (1..=5).map(sample_order).collect();
-        let bytes = encode_orders_batch(&orders).expect("encode");
-        let decoded = decode_orders_batch(&bytes).expect("decode");
+        let bytes = encode_orders_batch(String::from("BTCUSDT"), &orders).expect("encode");
+        let (_, decoded) = decode_orders_batch(&bytes).expect("decode");
         assert_eq!(
             decoded.len(),
             orders.len(),

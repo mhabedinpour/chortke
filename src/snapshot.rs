@@ -31,6 +31,7 @@
 //! - Calling [`SnapshotWriter::finish`] flushes buffers and calls `sync_all()` on the file
 //!   to ensure data is durably persisted on supported platforms.
 //!
+use crate::market::Symbol;
 use crate::order::{Order, wire};
 use crate::seq::Seq;
 use serde::{Deserialize, Serialize};
@@ -203,8 +204,12 @@ impl SnapshotWriter {
     /// - Returns [`Error::Codec`] if encoding the batch fails.
     /// - Returns [`Error::TooLarge`] if the encoded batch exceeds `u32::MAX` bytes.
     /// - Returns [`Error::Io`] if writing to the file fails.
-    pub async fn write_order_batch(&mut self, orders: &[Order]) -> Result<(), Error> {
-        let encoded = wire::encode_orders_batch(orders)?;
+    pub async fn write_order_batch(
+        &mut self,
+        symbol: Symbol,
+        orders: &[Order],
+    ) -> Result<(), Error> {
+        let encoded = wire::encode_orders_batch(symbol, orders)?;
         write_len_prefixed(&mut self.writer, &encoded).await?;
         Ok(())
     }
@@ -265,7 +270,7 @@ impl SnapshotReader {
     ///
     /// Returns `Ok(None)` on EOF (no more batches). Returns an error if the
     /// batch cannot be read or decoded.
-    pub async fn next_order_batch(&mut self) -> Result<Option<Vec<Order>>, Error> {
+    pub async fn next_order_batch(&mut self) -> Result<Option<(Symbol, Vec<Order>)>, Error> {
         let Some(bytes) = read_len_prefixed(&mut self.reader).await? else {
             return Ok(None);
         };
@@ -315,10 +320,10 @@ mod tests {
             .expect("failed to open writer");
         let o1 = mk_order(1);
         let o2 = mk_order(2);
-        w.write_order_batch(&[o1.clone()])
+        w.write_order_batch("BTCUSDT".into(), &[o1.clone()])
             .await
             .expect("write_batch 1 failed");
-        w.write_order_batch(&[o2.clone()])
+        w.write_order_batch("BTCUSDT".into(), &[o2.clone()])
             .await
             .expect("write_batch 2 failed");
         w.finish().await.expect("finish writer failed");
@@ -334,7 +339,7 @@ mod tests {
         );
         assert_eq!(r.metadata(), meta, "metadata mismatch");
 
-        let b1 = r
+        let (s1, b1) = r
             .next_order_batch()
             .await
             .expect("reading batch 1 errored")
@@ -346,8 +351,9 @@ mod tests {
             b1[0].id
         );
         assert_eq!(b1[0].client_id, o1.client_id, "batch 1 client_id mismatch");
+        assert_eq!(s1, "BTCUSDT", "batch 1 symbol mismatch");
 
-        let b2 = r
+        let (s2, b2) = r
             .next_order_batch()
             .await
             .expect("reading batch 2 errored")
@@ -363,6 +369,7 @@ mod tests {
             "batch 2 price mismatch: got {}",
             b2[0].price
         );
+        assert_eq!(s2, "BTCUSDT", "batch 2 symbol mismatch");
 
         let end = r.next_order_batch().await.expect("reading end errored");
         assert!(end.is_none(), "expected EOF None, got: {:?}", end);
