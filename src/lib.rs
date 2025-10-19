@@ -9,3 +9,4 @@ pub mod collections;
 pub mod user;
 
 pub mod seq;
+pub mod snapshot;
