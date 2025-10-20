@@ -48,6 +48,14 @@ impl From<order::book::Error> for Error {
                 "ORDER_ALREADY_EXISTS".into(),
                 format!("order with client id {} already exists", client_id),
             ),
+            order::book::Error::AnotherSnapshotAlreadyTaken => Error::BadRequest(
+                "SNAPSHOT_CONFLICT".into(),
+                "another snapshot is already in progress".into(),
+            ),
+            order::book::Error::NoSnapshotTaken => Error::BadRequest(
+                "NO_SNAPSHOT".into(),
+                "no active snapshot to operate on".into(),
+            ),
         }
     }
 }

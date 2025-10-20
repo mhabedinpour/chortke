@@ -7,12 +7,13 @@
 //! performed by crossing the best bid and best ask while prices overlap.
 
 use crate::collections::slab::SnapshotableSlab;
-use crate::order::book::{Depth, DepthItem, Error, HotBook};
+use crate::order::book::{Depth, DepthItem, Error, HotBook, SnapshotableBook};
 use crate::order::{Id, Order, Price, Side, Status, Volume};
 use crate::seq;
 use crate::trade::Trade;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use time::OffsetDateTime;
 
 /// Aggregated state for a single price level.
@@ -31,17 +32,64 @@ impl PriceLevel {
     /// Append an order node to the back of the level's FIFO queue and update
     /// aggregates. The `order_idx` must reference a valid entry in `orders`.
     fn push(&mut self, orders: &mut SnapshotableSlab<OrderNode>, order_idx: usize) {
-        match self.tail {
-            Some(tail) => {
-                orders[tail].next = Some(order_idx);
-                orders[order_idx].prev = Some(tail);
-                self.tail = Some(order_idx);
-            }
-            None => {
+        // Ensure the linked list at this price level remains ordered by order id (ascending).
+        // Order id is the time-priority key; slab index is irrelevant.
+        match (self.head, self.tail) {
+            (None, None) => {
+                // Empty list: new node becomes both head and tail.
                 self.head = Some(order_idx);
                 self.tail = Some(order_idx);
                 orders[order_idx].prev = None;
+                orders[order_idx].next = None;
             }
+            (Some(_), Some(tail_idx)) => {
+                let new_id = orders[order_idx].order.id;
+                let tail_id = orders[tail_idx].order.id;
+                if new_id >= tail_id {
+                    // Fast path: append to the end by id.
+                    orders[tail_idx].next = Some(order_idx);
+                    orders[order_idx].prev = Some(tail_idx);
+                    orders[order_idx].next = None;
+                    self.tail = Some(order_idx);
+                } else {
+                    // Find insertion point scanning backward from the tail until we
+                    // find a node with id <= new_id. Insert after it, or at head if none.
+                    let mut cursor = Some(tail_idx);
+                    let mut insert_after: Option<usize> = None;
+                    while let Some(cur) = cursor {
+                        if orders[cur].order.id <= new_id {
+                            insert_after = Some(cur);
+                            break;
+                        }
+                        cursor = orders[cur].prev;
+                    }
+
+                    match insert_after {
+                        Some(after_idx) => {
+                            // Insert between after_idx and after_next
+                            let after_next = orders[after_idx].next;
+                            orders[order_idx].prev = Some(after_idx);
+                            orders[order_idx].next = after_next;
+                            orders[after_idx].next = Some(order_idx);
+                            if let Some(nxt) = after_next {
+                                orders[nxt].prev = Some(order_idx);
+                            } else {
+                                // We inserted after the old tail
+                                self.tail = Some(order_idx);
+                            }
+                        }
+                        None => {
+                            // Insert at head (before current head)
+                            let old_head = self.head.unwrap();
+                            orders[order_idx].prev = None;
+                            orders[order_idx].next = Some(old_head);
+                            orders[old_head].prev = Some(order_idx);
+                            self.head = Some(order_idx);
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("PriceLevel invariant broken: head/tail mismatch"),
         }
 
         self.total_volume += orders[order_idx].order.remaining_volume();
@@ -80,6 +128,17 @@ struct OrderNode {
     prev: Option<usize>,
 }
 
+/// A lightweight iterator-like state used during full order book snapshots.
+#[derive(Debug)]
+struct Snapshot {
+    /// Frozen list of slab indices captured at the moment `take_snapshot` was
+    /// called.
+    keys: Arc<Vec<usize>>,
+    /// Current position within `keys` indicating how many orders have already
+    /// been emitted via `snapshot_batch`.
+    cursor: usize,
+}
+
 /// BTreeMap-backed order book implementing price-time priority.
 #[derive(Debug, Default)]
 pub struct TreeMap {
@@ -87,6 +146,7 @@ pub struct TreeMap {
     asks: BTreeMap<Price, PriceLevel>,
     orders: SnapshotableSlab<OrderNode>,
     order_indexes: HashMap<Id, usize>,
+    snapshot: Option<Snapshot>,
 }
 
 impl TreeMap {
@@ -293,11 +353,97 @@ impl HotBook for TreeMap {
     }
 }
 
+/// Snapshot export/import implementation for TreeMap.
+///
+/// This implementation allows clients to iterate over a consistent view of the
+/// book in batches without blocking normal operations. It relies on the
+/// underlying `SnapshotableSlab` to freeze key indices and keep them valid
+/// until `end_snapshot` is called.
+impl SnapshotableBook for TreeMap {
+    /// Begin a snapshot of the current book state.
+    ///
+    /// Captures a frozen list of slab indices via `SnapshotableSlab::begin_snapshot`.
+    /// Returns an error if a snapshot is already in progress.
+    fn take_snapshot(&mut self) -> Result<(), Error> {
+        if self.snapshot.is_some() {
+            return Err(Error::AnotherSnapshotAlreadyTaken);
+        }
+
+        self.snapshot = Some(Snapshot {
+            keys: self.orders.begin_snapshot(),
+            cursor: 0,
+        });
+        Ok(())
+    }
+
+    /// Retrieve up to `limit` orders from the active snapshot.
+    ///
+    /// Returns:
+    /// - Ok(Some(vec)) with up to `limit` orders when there are remaining items.
+    /// - Ok(None) when the snapshot has been fully drained.
+    ///
+    /// Errors:
+    /// - Error::NoSnapshotTaken if `take_snapshot` was not called.
+    fn snapshot_batch(&mut self, limit: usize) -> Result<Option<Vec<Order>>, Error> {
+        if self.snapshot.is_none() {
+            return Err(Error::NoSnapshotTaken);
+        }
+
+        let snapshot = self.snapshot.as_mut().unwrap();
+        let left_orders = snapshot.keys.len() - snapshot.cursor;
+        let batch_size = cmp::min(left_orders, limit);
+        if batch_size == 0 {
+            return Ok(None);
+        }
+
+        let mut orders = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let order = self
+                .orders
+                .get_for_snapshot(snapshot.keys[snapshot.cursor])
+                .unwrap()
+                .order
+                .clone();
+            orders.push(order);
+            snapshot.cursor += 1;
+        }
+        Ok(Some(orders))
+    }
+
+    /// Finish the current snapshot and release any resources/locks held by the
+    /// slab to keep indices stable.
+    ///
+    /// Must be called after fully draining or abandoning a snapshot. Returns an
+    /// error if no snapshot is active.
+    fn end_snapshot(&mut self) -> Result<(), Error> {
+        if self.snapshot.is_none() {
+            return Err(Error::NoSnapshotTaken);
+        }
+
+        self.snapshot = None;
+        self.orders.end_snapshot();
+        Ok(())
+    }
+
+    /// Restore a set of orders into the book as part of snapshot import.
+    ///
+    /// This is a convenience to replay a previously exported snapshot in
+    /// batches. Each order is validated and inserted through the normal `add`
+    /// path.
+    fn restore_snapshot_batch(&mut self, orders: Vec<Order>) -> Result<(), Error> {
+        for order in orders {
+            self.add(order)?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TreeMap;
     use crate::order::Id;
-    use crate::order::book::{DepthItem, Error, HotBook};
+    use crate::order::book::{DepthItem, Error, HotBook, SnapshotableBook};
     use crate::order::{Order, Side};
 
     fn o(id: Id, side: Side, price: u64, vol: u64) -> Order {
@@ -1056,5 +1202,165 @@ mod tests {
         let canceled = book.cancel(10, 0).unwrap();
         assert_eq!(canceled.id, 10);
         assert!(book.lookup(10).is_none(), "canceled order should be gone");
+    }
+
+    #[test]
+    fn test_same_price_fifo_by_id_even_with_out_of_order_insertion() {
+        let mut book = TreeMap::new();
+        // Makers on bid side at same price, inserted with IDs out of order relative to arrival
+        book.add(o(20, Side::Bid, 100, 1)).unwrap(); // first arrival, higher id
+        book.add(o(10, Side::Bid, 100, 1)).unwrap(); // second arrival, lower id -> should be ahead by id
+        book.add(o(30, Side::Bid, 100, 1)).unwrap(); // third arrival, higher id -> should be after 20
+        book.add(o(15, Side::Bid, 100, 1)).unwrap(); // fourth arrival, middle id -> should slot between 10 and 20
+
+        // Add taker asks that will consume four units at the same price.
+        // They should match bids in ascending ID order: 10, 15, 20, 30
+        book.add(o(1000, Side::Ask, 100, 1)).unwrap();
+        book.add(o(1001, Side::Ask, 100, 1)).unwrap();
+        book.add(o(1002, Side::Ask, 100, 1)).unwrap();
+        book.add(o(1003, Side::Ask, 100, 1)).unwrap();
+
+        let (trades, closed) = book.match_orders();
+        assert_eq!(trades.len(), 4, "expected 4 trades consuming four bids");
+        let bid_ids: Vec<_> = trades.iter().map(|t| t.bid_order_id).collect();
+        assert_eq!(
+            bid_ids,
+            vec![10, 15, 20, 30],
+            "bids must be matched in ascending id"
+        );
+
+        // All bid makers should be closed (closed also includes taker asks); verify bids are among the closed
+        let mut closed_bid_ids: Vec<_> = closed
+            .iter()
+            .filter(|o| matches!(o.side, Side::Bid))
+            .map(|o| o.id)
+            .collect();
+        closed_bid_ids.sort_unstable();
+        assert_eq!(closed_bid_ids, vec![10, 15, 20, 30]);
+
+        // Book should now be empty on both sides at price 100
+        let d = book.depth(10);
+        assert!(d.bids.is_empty(), "all bids should be consumed");
+        assert!(
+            d.asks.is_empty(),
+            "asks should have been consumed as takers"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_lifecycle_and_batching_on_tree_map() {
+        let mut book = TreeMap::new();
+        // Add three orders
+        book.add(o(1, Side::Bid, 100, 5)).unwrap();
+        book.add(o(2, Side::Ask, 101, 7)).unwrap();
+        book.add(o(3, Side::Bid, 99, 2)).unwrap();
+
+        // Begin snapshot
+        book.take_snapshot().unwrap();
+        // second begin should error
+        let err = book.take_snapshot().unwrap_err();
+        match err {
+            Error::AnotherSnapshotAlreadyTaken => {}
+            _ => panic!("expected AnotherSnapshotAlreadyTaken, got {:?}", err),
+        }
+
+        // Mutate book after snapshot: add and cancel; snapshot should still reflect the 3 original orders
+        book.add(o(4, Side::Ask, 98, 1)).unwrap();
+        let _ = book.cancel(3, 0).unwrap();
+
+        // Drain snapshot in batches of 2, then remainder
+        let mut seen = Vec::new();
+        if let Some(batch) = book.snapshot_batch(2).unwrap() {
+            seen.extend(batch.into_iter().map(|o| o.id));
+        } else {
+            panic!("expected first batch");
+        }
+        let next = book.snapshot_batch(2).unwrap();
+        match next {
+            Some(batch) => seen.extend(batch.into_iter().map(|o| o.id)),
+            None => panic!("expected second batch to contain remaining items"),
+        }
+        // third call should be None
+        assert!(
+            book.snapshot_batch(2).unwrap().is_none(),
+            "expected None after draining snapshot"
+        );
+
+        // Snapshot should contain exactly {1,2,3} regardless of ordering
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![1, 2, 3],
+            "snapshot must contain the original three orders only"
+        );
+
+        // End snapshot and ensure we can start a new one
+        book.end_snapshot().unwrap();
+        book.take_snapshot().unwrap();
+        book.end_snapshot().unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_errors_without_begin() {
+        let mut book = TreeMap::new();
+        // Calling snapshot_batch without take_snapshot should error
+        let err = book.snapshot_batch(10).unwrap_err();
+        match err {
+            Error::NoSnapshotTaken => {}
+            other => panic!("expected NoSnapshotTaken, got {:?}", other),
+        }
+        // Calling end_snapshot without take_snapshot should error
+        let err = book.end_snapshot().unwrap_err();
+        match err {
+            Error::NoSnapshotTaken => {}
+            other => panic!("expected NoSnapshotTaken on end, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_restore_snapshot_batch_inserts_orders() {
+        let mut book = TreeMap::new();
+        // Restore two bids and one ask
+        book.restore_snapshot_batch(vec![
+            o(11, Side::Bid, 100, 3),
+            o(12, Side::Bid, 101, 2),
+            o(13, Side::Ask, 103, 4),
+        ])
+        .unwrap();
+
+        // Verify depth reflects restored orders
+        let d = book.depth(10);
+        assert_eq!(d.bids.len(), 2);
+        assert_eq!(d.asks.len(), 1);
+        assert_eq!(
+            d.bids[0],
+            DepthItem {
+                price: 101,
+                volume: 2
+            }
+        );
+        assert_eq!(
+            d.bids[1],
+            DepthItem {
+                price: 100,
+                volume: 3
+            }
+        );
+        assert_eq!(
+            d.asks[0],
+            DepthItem {
+                price: 103,
+                volume: 4
+            }
+        );
+
+        // Adding a duplicate should fail since restore uses normal add path
+        let err = book
+            .restore_snapshot_batch(vec![o(11, Side::Bid, 100, 1)])
+            .unwrap_err();
+        match err {
+            Error::OrderIdExists(11) => {}
+            other => panic!("expected OrderIdExists(11), got {:?}", other),
+        }
     }
 }

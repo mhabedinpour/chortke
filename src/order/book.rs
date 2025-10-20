@@ -43,6 +43,12 @@ pub enum Error {
     #[error("another order with the same client id #{0} already exists")]
     /// Tried to add an order with a client ID that already exists.
     OrderClientIdExists(ClientId),
+    #[error("another snapshot is already in progress")]
+    // Tried to take a new snapshot while another is in progress.
+    AnotherSnapshotAlreadyTaken,
+    #[error("no snapshot is currently in progress")]
+    // Tried to end a snapshot or get a batch when no snapshot is taken.
+    NoSnapshotTaken,
 }
 
 // TODO: add prometheus metrics
@@ -60,4 +66,38 @@ pub trait HotBook {
     fn match_orders(&mut self) -> (Vec<crate::trade::Trade>, Vec<Order>);
     // Gets an order by its ID.
     fn lookup(&self, id: Id) -> Option<&Order>;
+}
+
+/// Interface for streaming snapshots of the order book state and restoring from them.
+///
+/// Snapshotting is expected to work in batches so very large books can be
+/// serialized without holding all orders in memory at once. A typical usage is:
+///
+/// - Call `take_snapshot()` to start a new snapshot session. Only one session
+///   can be active at a time. Starting another while one is active returns
+///   `Error::AnotherSnapshotAlreadyTaken`.
+/// - Repeatedly call `snapshot_batch(limit)` until it returns `Ok(None)`, which
+///   signals that there are no more orders to stream.
+/// - Finally, call `end_snapshot()` to close the session and free any resources.
+///
+/// Restoring follows the reverse direction: feed batches of orders obtained from
+/// a snapshot into `restore_snapshot_batch` until the whole snapshot has been
+/// applied.
+pub trait SnapshotableBook {
+    /// Start a new snapshot session. Fails if another snapshot is already in progress.
+    fn take_snapshot(&mut self) -> Result<(), Error>;
+    /// Return up to `limit` open orders from the ongoing snapshot.
+    ///
+    /// When there are no more orders to stream, returns `Ok(None)`. If no
+    /// snapshot is currently in progress, returns `Error::NoSnapshotTaken`.
+    fn snapshot_batch(&mut self, limit: usize) -> Result<Option<Vec<Order>>, Error>;
+    /// End the current snapshot session, releasing any temporary state.
+    ///
+    /// Returns `Error::NoSnapshotTaken` if called without an active snapshot.
+    fn end_snapshot(&mut self) -> Result<(), Error>;
+
+    /// Restore a batch of orders that belong to a previously taken snapshot.
+    /// Implementations should accept multiple calls and apply orders idempotently
+    /// within the context of the ongoing restore process.
+    fn restore_snapshot_batch(&mut self, orders: Vec<Order>) -> Result<(), Error>;
 }
