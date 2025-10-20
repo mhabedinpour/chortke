@@ -62,7 +62,7 @@ struct Snapshot {
 ///
 /// Type parameter `T` is any order book implementation that satisfies the
 /// `HotBook` trait.
-pub struct WarmBook<T: HotBook> {
+pub struct WarmBook<T: HotBook + SnapshotableBook> {
     hot_book: T,
     /// Maps formatted `user_id:client_id` strings to internal order IDs to
     /// support client-side identifiers.
@@ -83,7 +83,7 @@ pub struct WarmBook<T: HotBook> {
     snapshot: Option<Snapshot>,
 }
 
-impl<T: HotBook> WarmBook<T> {
+impl<T: HotBook + SnapshotableBook> WarmBook<T> {
     /// Create a new warm book wrapper over the provided hot book.
     pub fn new(hot_book: T) -> Self {
         WarmBook {
@@ -243,9 +243,13 @@ impl<T: HotBook> WarmBook<T> {
             }
         }
     }
+
+    pub fn inner_snapshotable_book(&self) -> &impl SnapshotableBook {
+        &self.hot_book
+    }
 }
 
-impl<T: HotBook> SnapshotableBook for WarmBook<T> {
+impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
     /// Begins a snapshot over the current set of closed orders.
     ///
     /// Only one snapshot can be active at a time; attempting to take another
