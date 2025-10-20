@@ -1,7 +1,6 @@
 use slab::Slab;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Index, IndexMut};
-use std::sync::Arc;
 
 /// A thin wrapper around `slab::Slab` that can take a point-in-time snapshot.
 ///
@@ -23,8 +22,8 @@ pub struct SnapshotableSlab<T> {
 
 #[derive(Debug)]
 struct SnapshotCtx<T> {
-    /// Keys present when the snapshot started. Sorted (as returned by `Slab::iter`).
-    keys_at_start: Arc<Vec<usize>>,
+    /// Keys inserted after the snapshot was started.
+    keys_after: HashSet<usize>,
     /// Old values for keys that have been changed/removed since the snapshot began.
     old: HashMap<usize, T>,
 }
@@ -40,19 +39,17 @@ impl<T> Default for SnapshotableSlab<T> {
 }
 
 impl<T: Clone> SnapshotableSlab<T> {
-    /// Begins a snapshot and returns an `Arc` of the key list that existed at that moment.
+    /// Begins a snapshot and returns a vector of the key list that existed at that moment.
     ///
     /// Panics if a snapshot is already active.
-    pub fn begin_snapshot(&mut self) -> Arc<Vec<usize>> {
+    pub fn begin_snapshot(&mut self) -> Vec<usize> {
         assert!(self.snap.is_none());
-        let mut keys: Vec<usize> = self.live_keys.iter().copied().collect();
-        keys.sort_unstable();
         let ctx = SnapshotCtx {
-            keys_at_start: Arc::new(keys.clone()),
+            keys_after: HashSet::new(),
             old: HashMap::new(),
         };
         self.snap = Some(ctx);
-        self.snap.as_ref().unwrap().keys_at_start.clone()
+        self.live_keys.iter().copied().collect()
     }
 
     /// Ends the current snapshot (if any), returning to normal semantics.
@@ -66,7 +63,7 @@ impl<T: Clone> SnapshotableSlab<T> {
             if ctx.old.contains_key(&key) {
                 return;
             }
-            if ctx.keys_at_start.binary_search(&key).is_ok() {
+            if !ctx.keys_after.contains(&key) {
                 let old = self.slab[key].clone();
                 ctx.old.insert(key, old);
             }
@@ -76,6 +73,9 @@ impl<T: Clone> SnapshotableSlab<T> {
     /// Inserts a value into the underlying slab and returns its key.
     pub fn insert(&mut self, v: T) -> usize {
         let k = self.slab.insert(v);
+        if let Some(snap) = &mut self.snap {
+            snap.keys_after.insert(k);
+        }
         self.live_keys.insert(k);
         k
     }
@@ -114,6 +114,9 @@ impl<T: Clone> SnapshotableSlab<T> {
     pub fn remove(&mut self, key: usize) -> T {
         self.maybe_stash_old(key);
         let v = self.slab.remove(key);
+        if let Some(snap) = &mut self.snap {
+            snap.keys_after.remove(&key);
+        }
         self.live_keys.remove(&key);
         v
     }
@@ -144,9 +147,7 @@ mod tests {
         let mut s: SnapshotableSlab<i32> = SnapshotableSlab::default();
         let a = s.insert(10);
         let b = s.insert(20);
-        let keys = s.begin_snapshot();
-        // keys should contain both a and b
-        let mut ks = keys.as_ref().clone();
+        let mut ks = s.begin_snapshot();
         ks.sort_unstable();
         let mut expected = vec![a, b];
         expected.sort_unstable();

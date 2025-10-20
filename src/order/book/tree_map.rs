@@ -13,7 +13,6 @@ use crate::seq;
 use crate::trade::Trade;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use time::OffsetDateTime;
 
 /// Aggregated state for a single price level.
@@ -133,7 +132,7 @@ struct OrderNode {
 struct Snapshot {
     /// Frozen list of slab indices captured at the moment `take_snapshot` was
     /// called.
-    keys: Arc<Vec<usize>>,
+    keys: Vec<usize>,
     /// Current position within `keys` indicating how many orders have already
     /// been emitted via `snapshot_batch`.
     cursor: usize,

@@ -14,12 +14,15 @@
 //! - Closed orders should eventually be archived to a persistent storage system
 //!   (not implemented here) and then removed from memory to bound RAM usage.
 
-use crate::order::book::{Depth, Error, HotBook};
+use crate::collections::hash_map::SnapshotableHashMap;
+use crate::order::book::{Depth, Error, HotBook, SnapshotableBook};
 use crate::order::{ClientId, Id, Order};
 use crate::{seq, user};
+use std::cmp;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+
 struct SeqClosedOrders {
     close_seq: seq::Seq,
     orders: Vec<Id>,
@@ -43,6 +46,17 @@ impl Ord for SeqClosedOrders {
     }
 }
 
+/// A lightweight iterator-like state used during full order book snapshots.
+#[derive(Debug)]
+struct Snapshot {
+    /// Frozen list of order ids captured at the moment `take_snapshot` was
+    /// called.
+    keys: Vec<Id>,
+    /// Current position within `keys` indicating how many orders have already
+    /// been emitted via `snapshot_batch`.
+    cursor: usize,
+}
+
 /// A wrapper around a `HotBook` that tracks recently closed orders in memory
 /// for quick lookup by ID or by user/client ID pair.
 ///
@@ -55,7 +69,7 @@ pub struct WarmBook<T: HotBook> {
     client_id_to_order_id: HashMap<String, Id>,
     /// In-memory store of recently closed orders (canceled or fully filled).
     /// These entries are intended to be short-lived.
-    closed_orders: HashMap<Id, Order>,
+    closed_orders: SnapshotableHashMap<Id, Order>,
     /// A min-heap of batches of closed orders, grouped by the sequence at
     /// which they were closed.
     ///
@@ -66,6 +80,7 @@ pub struct WarmBook<T: HotBook> {
     /// efficiently remove all closed orders up to and including a given archived
     /// seq, after they have been persisted to durable storage.
     closed_orders_by_seq: BinaryHeap<Reverse<SeqClosedOrders>>,
+    snapshot: Option<Snapshot>,
 }
 
 impl<T: HotBook> WarmBook<T> {
@@ -74,8 +89,9 @@ impl<T: HotBook> WarmBook<T> {
         WarmBook {
             hot_book,
             client_id_to_order_id: HashMap::new(),
-            closed_orders: HashMap::new(),
+            closed_orders: SnapshotableHashMap::default(),
             closed_orders_by_seq: BinaryHeap::new(),
+            snapshot: None,
         }
     }
 
@@ -147,8 +163,10 @@ impl<T: HotBook> WarmBook<T> {
     /// warm store for later lookup.
     pub fn match_orders(&mut self) -> (Vec<crate::trade::Trade>, Vec<Order>) {
         let (trades, closed_orders) = self.hot_book.match_orders();
-        self.closed_orders
-            .extend(closed_orders.iter().map(|o| (o.id, o.clone())));
+        for closed_order in &closed_orders {
+            self.closed_orders
+                .insert(closed_order.id, closed_order.clone());
+        }
 
         let mut grouped: HashMap<seq::Seq, Vec<Id>> = HashMap::new();
         for order in closed_orders.iter() {
@@ -227,10 +245,107 @@ impl<T: HotBook> WarmBook<T> {
     }
 }
 
+impl<T: HotBook> SnapshotableBook for WarmBook<T> {
+    /// Begins a snapshot over the current set of closed orders.
+    ///
+    /// Only one snapshot can be active at a time; attempting to take another
+    /// while one is in progress returns `Error::AnotherSnapshotAlreadyTaken`.
+    /// Orders closed after this call will not be part of the snapshot stream.
+    fn take_snapshot(&mut self) -> Result<(), Error> {
+        if self.snapshot.is_some() {
+            return Err(Error::AnotherSnapshotAlreadyTaken);
+        }
+
+        self.snapshot = Some(Snapshot {
+            keys: self.closed_orders.begin_snapshot(),
+            cursor: 0,
+        });
+        Ok(())
+    }
+
+    /// Returns up to `limit` closed orders from the active snapshot.
+    ///
+    /// When no more orders remain in the snapshot, returns `Ok(None)`.
+    /// If called without an active snapshot, returns `Error::NoSnapshotTaken`.
+    /// If orders are evicted or modified during an active snapshot, the
+    /// previously snapshotted values are returned (snapshot isolation).
+    fn snapshot_batch(&mut self, limit: usize) -> Result<Option<Vec<Order>>, Error> {
+        if self.snapshot.is_none() {
+            return Err(Error::NoSnapshotTaken);
+        }
+
+        let snapshot = self.snapshot.as_mut().unwrap();
+        let left_orders = snapshot.keys.len() - snapshot.cursor;
+        let batch_size = cmp::min(left_orders, limit);
+        if batch_size == 0 {
+            return Ok(None);
+        }
+
+        let mut orders = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let order = self
+                .closed_orders
+                .get_for_snapshot(&snapshot.keys[snapshot.cursor])
+                .unwrap()
+                .clone();
+            orders.push(order);
+            snapshot.cursor += 1;
+        }
+        Ok(Some(orders))
+    }
+
+    /// Ends the current snapshot session and clears internal snapshot state.
+    ///
+    /// Returns `Error::NoSnapshotTaken` if no snapshot is active.
+    fn end_snapshot(&mut self) -> Result<(), Error> {
+        if self.snapshot.is_none() {
+            return Err(Error::NoSnapshotTaken);
+        }
+
+        self.snapshot = None;
+        self.closed_orders.end_snapshot();
+        Ok(())
+    }
+
+    /// Restores a batch of closed orders back into the warm cache.
+    ///
+    /// Orders without `closed_by` are ignored. For the rest, this method:
+    /// - Rebuilds the `(user_id, client_id) -> order_id` index,
+    /// - Re-inserts the orders into the closed-order store, and
+    /// - Reconstructs the min-heap that tracks groups of orders by their closing seq.
+    fn restore_snapshot_batch(&mut self, orders: Vec<Order>) -> Result<(), Error> {
+        let mut closed_orders_by_seq: HashMap<seq::Seq, Vec<Id>> = HashMap::new();
+        for order in orders {
+            if order.closed_by.is_none() {
+                continue;
+            }
+
+            self.client_id_to_order_id.insert(
+                Order::format_user_client_id(&order.user_id, &order.client_id),
+                order.id,
+            );
+            closed_orders_by_seq
+                .entry(order.closed_by.unwrap())
+                .or_default()
+                .push(order.id);
+            self.closed_orders.insert(order.id, order);
+        }
+
+        for (seq, ids) in closed_orders_by_seq.into_iter() {
+            self.closed_orders_by_seq.push(Reverse(SeqClosedOrders {
+                close_seq: seq,
+                orders: ids,
+            }));
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WarmBook;
-    use crate::order::book::{Error, tree_map::TreeMap};
+    use crate::order::book::{Error, SnapshotableBook, tree_map::TreeMap};
     use crate::order::{Order, Side};
 
     fn wb() -> WarmBook<TreeMap> {
@@ -618,5 +733,124 @@ mod tests {
             "best ask volume should be 2, got: {}",
             depth.asks[0].volume
         );
+    }
+
+    // --- SnapshotableBook tests ---
+
+    #[test]
+    fn test_snapshot_errors_and_batches() {
+        let mut book = wb();
+        // Prepare three closed orders
+        assert!(book.add(o(1, "u1", "c1", Side::Bid, 100, 1)).is_ok());
+        assert!(book.add(o(2, "u2", "c2", Side::Ask, 101, 2)).is_ok());
+        assert!(book.add(o(3, "u3", "c3", Side::Bid, 99, 3)).is_ok());
+        let _ = book.cancel(1, 10).unwrap();
+        let _ = book.cancel(2, 11).unwrap();
+        let _ = book.cancel(3, 12).unwrap();
+
+        // Calling batch before take should error
+        assert!(matches!(
+            book.snapshot_batch(10),
+            Err(Error::NoSnapshotTaken)
+        ));
+        assert!(matches!(book.end_snapshot(), Err(Error::NoSnapshotTaken)));
+
+        // Take snapshot and ensure double take errors
+        assert!(book.take_snapshot().is_ok());
+        assert!(matches!(
+            book.take_snapshot(),
+            Err(Error::AnotherSnapshotAlreadyTaken)
+        ));
+
+        // Stream in two batches (limit=2 then limit=2)
+        let b1 = book.snapshot_batch(2).unwrap().unwrap();
+        assert_eq!(b1.len(), 2, "first batch should contain 2 orders");
+        let b2 = book.snapshot_batch(2).unwrap().unwrap();
+        assert_eq!(b2.len(), 1, "second batch should contain the last order");
+        // No more orders
+        assert!(book.snapshot_batch(1).unwrap().is_none());
+
+        // End snapshot
+        assert!(book.end_snapshot().is_ok());
+        // No active snapshot anymore
+        assert!(matches!(
+            book.snapshot_batch(1),
+            Err(Error::NoSnapshotTaken)
+        ));
+    }
+
+    #[test]
+    fn test_snapshot_isolation_with_eviction_and_new_closures() {
+        let mut book = wb();
+        // Close two orders at seq 5 and 6
+        assert!(book.add(o(1, "u1", "c1", Side::Bid, 100, 1)).is_ok());
+        assert!(book.add(o(2, "u2", "c2", Side::Ask, 101, 2)).is_ok());
+        let _ = book.cancel(1, 5).unwrap();
+        let _ = book.cancel(2, 6).unwrap();
+
+        // Start snapshot
+        assert!(book.take_snapshot().is_ok());
+
+        // Evict everything up to 6 (would remove both from the live map)
+        book.evict_closed_orders(6);
+        // Also close a new order after snapshot start
+        assert!(book.add(o(3, "u3", "c3", Side::Bid, 99, 3)).is_ok());
+        let _ = book.cancel(3, 7).unwrap();
+
+        // Even though we evicted and added new closures, the snapshot should still
+        // stream the original two orders and not include id=3
+        let mut total = 0usize;
+        loop {
+            let batch = book.snapshot_batch(10).unwrap();
+            match batch {
+                None => break,
+                Some(v) => total += v.len(),
+            }
+        }
+        assert_eq!(
+            total, 2,
+            "snapshot should contain exactly the two original orders"
+        );
+        // End snapshot to clear state
+        assert!(book.end_snapshot().is_ok());
+    }
+
+    #[test]
+    fn test_restore_snapshot_batch_rebuilds_structures() {
+        let mut book = wb();
+        // Build a batch with mixed seqs and one open order that should be ignored
+        let mut o1 = o(1, "u1", "c1", Side::Bid, 100, 1);
+        let mut o2 = o(2, "u2", "c2", Side::Ask, 101, 2);
+        let o3 = o(3, "u3", "c3", Side::Bid, 99, 3);
+        // Mark closed_by for first two; leave third as open (None) to be ignored
+        o1.closed_by = Some(5);
+        o2.closed_by = Some(7);
+        // Restore
+        assert!(
+            book.restore_snapshot_batch(vec![o1.clone(), o2.clone(), o3.clone()])
+                .is_ok()
+        );
+        // Lookups by client id should work for closed ones
+        assert!(
+            book.lookup_by_client_id("u1".to_string(), "c1".to_string())
+                .is_some()
+        );
+        assert!(
+            book.lookup_by_client_id("u2".to_string(), "c2".to_string())
+                .is_some()
+        );
+        // The open one should not be present
+        assert!(
+            book.lookup_by_client_id("u3".to_string(), "c3".to_string())
+                .is_none()
+        );
+
+        // Evict only seq 5 -> removes order 1; order 2 remains
+        book.evict_closed_orders(5);
+        assert!(book.lookup(1).is_none());
+        assert!(book.lookup(2).is_some());
+        // Evict up to 7 -> removes order 2 as well
+        book.evict_closed_orders(7);
+        assert!(book.lookup(2).is_none());
     }
 }

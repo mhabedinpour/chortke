@@ -30,3 +30,14 @@ bincode = "1.3.3"
 zstd = "0.13.3"
 blake3 = "1.8.2"
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "hash_map_begin_snapshot_bench"
+harness = false
+
+[[bench]]
+name = "slab_begin_snapshot_bench"
+harness = false
+
