@@ -35,6 +35,7 @@ use crate::market::Symbol;
 use crate::order::{Order, wire};
 use crate::seq::Seq;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{io, path::Path};
 use thiserror::Error;
 use tokio::fs::File;
@@ -76,13 +77,13 @@ pub enum Error {
 const MAGIC: &[u8; 8] = b"MACHNSNP"; // 8-byte magic at the very start
 const SUPPORTED_GLOBAL_VERSION: u16 = 1;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 /// Metadata persisted in the snapshot header section, immediately after magic and version.
 pub struct Metadata {
-    /// Highest applied sequence number at the time of snapshot.
-    pub latest_seq: Seq,
-    /// Highest archived sequence number at the time of snapshot (inclusive).
-    pub latest_archived_seq: Seq,
+    /// Highest applied sequence number per symbol at the time of snapshot.
+    pub latest_seq: HashMap<Symbol, Seq>,
+    /// Highest archived sequence number per symbol at the time of snapshot (inclusive).
+    pub latest_archived_seq: HashMap<Symbol, Seq>,
 }
 
 async fn write_header(f: &mut File, global_version: u16) -> Result<(), Error> {
@@ -262,8 +263,8 @@ impl SnapshotReader {
     }
 
     /// Return snapshot metadata read from the file.
-    pub fn metadata(&self) -> Metadata {
-        self.metadata
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
     }
 
     /// Read and decode the next batch of orders.
@@ -284,7 +285,7 @@ mod tests {
     use super::*;
     use crate::order::{self};
     use crate::snapshot::Error as SnapErr;
-    use crate::user;
+    use crate::{user};
     use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
@@ -310,11 +311,11 @@ mod tests {
 
         // Write two batches
         let meta = Metadata {
-            latest_seq: 123,
-            latest_archived_seq: 120,
+            latest_seq: HashMap::from([(Symbol::from("BTCUSDT"), 200)]),
+            latest_archived_seq: HashMap::from([(Symbol::from("BTCUSDT"), 100)]),
         };
         let mut w = SnapshotWriterBuilder::new(&path)
-            .with_metadata(meta)
+            .with_metadata(meta.clone())
             .open()
             .await
             .expect("failed to open writer");
@@ -337,7 +338,7 @@ mod tests {
             SUPPORTED_GLOBAL_VERSION,
             "unexpected global version in snapshot"
         );
-        assert_eq!(r.metadata(), meta, "metadata mismatch");
+        assert_eq!(*r.metadata(), meta, "metadata mismatch");
 
         let (s1, b1) = r
             .next_order_batch()
