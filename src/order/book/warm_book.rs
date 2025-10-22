@@ -243,18 +243,19 @@ impl<T: HotBook + SnapshotableBook> WarmBook<T> {
             }
         }
     }
-
-    pub fn inner_snapshotable_book(&self) -> &impl SnapshotableBook {
-        &self.hot_book
-    }
 }
 
 impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
-    /// Begins a snapshot over the current set of closed orders.
+    /// Begins a snapshot over the current set of closed orders, then chains into the hot book snapshot.
     ///
     /// Only one snapshot can be active at a time; attempting to take another
     /// while one is in progress returns `Error::AnotherSnapshotAlreadyTaken`.
     /// Orders closed after this call will not be part of the snapshot stream.
+    ///
+    /// Behavior change: after closed orders are fully drained via `snapshot_batch`,
+    /// subsequent `snapshot_batch` calls will continue streaming orders from the
+    /// underlying hot book's snapshot (active/open orders as of the moment this
+    /// snapshot was taken).
     fn take_snapshot(&mut self) -> Result<(), Error> {
         if self.snapshot.is_some() {
             return Err(Error::AnotherSnapshotAlreadyTaken);
@@ -264,12 +265,17 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
             keys: self.closed_orders.begin_snapshot(),
             cursor: 0,
         });
+        self.hot_book.take_snapshot().expect("hot book already in snapshot");
         Ok(())
     }
 
-    /// Returns up to `limit` closed orders from the active snapshot.
+    /// Returns up to `limit` orders from the active composite snapshot.
     ///
-    /// When no more orders remain in the snapshot, returns `Ok(None)`.
+    /// This first drains closed orders. After closed orders are exhausted,
+    /// subsequent calls will return batches from the underlying hot book
+    /// snapshot (open/active orders captured at `take_snapshot`).
+    ///
+    /// When no more orders remain in either part, returns `Ok(None)`.
     /// If called without an active snapshot, returns `Error::NoSnapshotTaken`.
     /// If orders are evicted or modified during an active snapshot, the
     /// previously snapshotted values are returned (snapshot isolation).
@@ -282,7 +288,8 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
         let left_orders = snapshot.keys.len() - snapshot.cursor;
         let batch_size = cmp::min(left_orders, limit);
         if batch_size == 0 {
-            return Ok(None);
+            // if closed orders are done, return hot book snapshot
+            return self.hot_book.snapshot_batch(limit);
         }
 
         let mut orders = Vec::with_capacity(batch_size);
@@ -300,6 +307,8 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
 
     /// Ends the current snapshot session and clears internal snapshot state.
     ///
+    /// This will also end the underlying hot book snapshot.
+    ///
     /// Returns `Error::NoSnapshotTaken` if no snapshot is active.
     fn end_snapshot(&mut self) -> Result<(), Error> {
         if self.snapshot.is_none() {
@@ -308,6 +317,7 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
 
         self.snapshot = None;
         self.closed_orders.end_snapshot();
+        self.hot_book.end_snapshot().expect("hot book not in snapshot");
         Ok(())
     }
 
@@ -751,6 +761,9 @@ mod tests {
         let _ = book.cancel(1, 10).unwrap();
         let _ = book.cancel(2, 11).unwrap();
         let _ = book.cancel(3, 12).unwrap();
+        // Also prepare two open orders which should be included after closed ones
+        assert!(book.add(o(4, "u4", "c4", Side::Bid, 105, 4)).is_ok());
+        assert!(book.add(o(5, "u5", "c5", Side::Ask, 95, 5)).is_ok());
 
         // Calling batch before take should error
         assert!(matches!(
@@ -766,12 +779,16 @@ mod tests {
             Err(Error::AnotherSnapshotAlreadyTaken)
         ));
 
-        // Stream in two batches (limit=2 then limit=2)
+        // Stream closed orders first (limit=2 then limit=2)
         let b1 = book.snapshot_batch(2).unwrap().unwrap();
-        assert_eq!(b1.len(), 2, "first batch should contain 2 orders");
+        assert_eq!(b1.len(), 2, "first batch should contain 2 closed orders");
         let b2 = book.snapshot_batch(2).unwrap().unwrap();
-        assert_eq!(b2.len(), 1, "second batch should contain the last order");
-        // No more orders
+        assert_eq!(b2.len(), 1, "second batch should contain the last closed order");
+
+        // Now the snapshot should continue with hot book (open) orders
+        let b3 = book.snapshot_batch(10).unwrap().unwrap();
+        assert_eq!(b3.len(), 2, "third batch should contain the 2 open orders from hot book");
+        // No more orders after hot book is drained
         assert!(book.snapshot_batch(1).unwrap().is_none());
 
         // End snapshot
