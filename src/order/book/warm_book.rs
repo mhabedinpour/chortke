@@ -321,16 +321,20 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
         Ok(())
     }
 
-    /// Restores a batch of closed orders back into the warm cache.
+    /// Restores a batch of orders from a snapshot back into the warm cache.
     ///
-    /// Orders without `closed_by` are ignored. For the rest, this method:
-    /// - Rebuilds the `(user_id, client_id) -> order_id` index,
-    /// - Re-inserts the orders into the closed-order store, and
-    /// - Reconstructs the min-heap that tracks groups of orders by their closing seq.
+    /// This method accepts both closed and open orders:
+    /// - Closed orders (with `closed_by = Some(seq)`) are re-indexed by
+    ///   `(user_id, client_id) -> order_id`, re-inserted into the closed-order
+    ///   store, and grouped by their closing sequence to rebuild the min-heap.
+    /// - Open orders (with `closed_by = None`) are forwarded to the underlying
+    ///   hot book via `add`, effectively restoring active orders as well.
     fn restore_snapshot_batch(&mut self, orders: Vec<Order>) -> Result<(), Error> {
         let mut closed_orders_by_seq: HashMap<seq::Seq, Vec<Id>> = HashMap::new();
         for order in orders {
             if order.closed_by.is_none() {
+                self.hot_book.add(order)?;
+
                 continue;
             }
 
