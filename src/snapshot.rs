@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::order::{self};
     use crate::snapshot::Error as SnapErr;
-    use crate::{user};
+    use crate::user;
     use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;

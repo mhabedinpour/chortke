@@ -265,7 +265,9 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
             keys: self.closed_orders.begin_snapshot(),
             cursor: 0,
         });
-        self.hot_book.take_snapshot().expect("hot book already in snapshot");
+        self.hot_book
+            .take_snapshot()
+            .expect("hot book already in snapshot");
         Ok(())
     }
 
@@ -317,7 +319,9 @@ impl<T: HotBook + SnapshotableBook> SnapshotableBook for WarmBook<T> {
 
         self.snapshot = None;
         self.closed_orders.end_snapshot();
-        self.hot_book.end_snapshot().expect("hot book not in snapshot");
+        self.hot_book
+            .end_snapshot()
+            .expect("hot book not in snapshot");
         Ok(())
     }
 
@@ -787,11 +791,19 @@ mod tests {
         let b1 = book.snapshot_batch(2).unwrap().unwrap();
         assert_eq!(b1.len(), 2, "first batch should contain 2 closed orders");
         let b2 = book.snapshot_batch(2).unwrap().unwrap();
-        assert_eq!(b2.len(), 1, "second batch should contain the last closed order");
+        assert_eq!(
+            b2.len(),
+            1,
+            "second batch should contain the last closed order"
+        );
 
         // Now the snapshot should continue with hot book (open) orders
         let b3 = book.snapshot_batch(10).unwrap().unwrap();
-        assert_eq!(b3.len(), 2, "third batch should contain the 2 open orders from hot book");
+        assert_eq!(
+            b3.len(),
+            2,
+            "third batch should contain the 2 open orders from hot book"
+        );
         // No more orders after hot book is drained
         assert!(book.snapshot_batch(1).unwrap().is_none());
 

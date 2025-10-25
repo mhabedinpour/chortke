@@ -49,6 +49,9 @@ pub enum Error {
     #[error("no snapshot is currently in progress")]
     // Tried to end a snapshot or get a batch when no snapshot is taken.
     NoSnapshotTaken,
+    #[error("matcher/book is not ready to process operations yet")]
+    // Tried an operation before initializing the book.
+    NotReady,
 }
 
 // TODO: add prometheus metrics
